@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+# All-in-one: the stock linuxserver.io Jackett image + jackett-ui served by nginx on 8080.
+# Jackett itself is untouched (same /config, PUID/PGID, TZ). Build arg JACKETT_IMAGE picks the Jackett version.
+ARG JACKETT_IMAGE=lscr.io/linuxserver/jackett:latest
+
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+RUN npm run build
+
+FROM ${JACKETT_IMAGE}
+ARG UI_PORT=8080
+COPY deploy/nginx.conf.template /tmp/jackett-ui.conf.template
+RUN apk add --no-cache nginx \
+ && apk add --no-cache --virtual .tpl gettext \
+ && JACKETT_URL=http://127.0.0.1:9117 LISTEN_PORT=${UI_PORT} \
+    envsubst '${JACKETT_URL} ${LISTEN_PORT}' < /tmp/jackett-ui.conf.template > /etc/nginx/http.d/jackett-ui.conf \
+ && sed -i 's#root /usr/share/nginx/html;#root /app/jackett-ui;#' /etc/nginx/http.d/jackett-ui.conf \
+ && rm -f /etc/nginx/http.d/default.conf /tmp/jackett-ui.conf.template \
+ && apk del .tpl \
+ && mkdir -p /run/nginx
+COPY --from=build /app/dist /app/jackett-ui
+COPY deploy/aio/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+RUN chmod +x /etc/s6-overlay/s6-rc.d/svc-jackett-ui/run \
+ && touch /etc/s6-overlay/s6-rc.d/user/contents.d/svc-jackett-ui
+EXPOSE 8080 9117
+LABEL org.opencontainers.image.title="jackett-ui (all-in-one)" \
+      org.opencontainers.image.description="Jackett (linuxserver.io image) with jackett-ui on port 8080" \
+      org.opencontainers.image.source="https://github.com/bropines/jackett-ui"

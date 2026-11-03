@@ -15,6 +15,30 @@ UI language: Russian (for now).
 
 ## Run
 
+### All-in-one (simplest)
+
+One container: the stock [linuxserver.io Jackett](https://docs.linuxserver.io/images/docker-jackett) image with jackett-ui added on port 8080. Same `/config`, `PUID`, `PGID` and `TZ` as the linuxserver image, so you can switch an existing install by changing the image name.
+
+```yaml
+services:
+  jackett:
+    image: ghcr.io/bropines/jackett-ui:aio
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Moscow
+    volumes:
+      - ./config:/config
+    ports:
+      - "8080:8080"   # new UI (proxies the Jackett API)
+      - "9117:9117"   # Jackett's own UI and API (optional)
+    restart: unless-stopped
+```
+
+The image is rebuilt daily when a new Jackett version comes out: `:aio` is always the newest, `:aio-v0.24.2994-ls24` pins one Jackett build.
+
+### UI next to an existing Jackett
+
 ```yaml
 services:
   jackett:
