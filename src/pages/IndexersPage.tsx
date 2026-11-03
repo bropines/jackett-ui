@@ -36,13 +36,20 @@ export function IndexersPage() {
   const navigate = useNavigate({ from: "/indexers" });
   const qc = useQueryClient();
 
-  const indexersQ = useQuery({ queryKey: qk.indexers, queryFn: api.indexers, staleTime: INDEXERS_STALE_MS });
+  // Configured list is tiny; the full catalog (~400 KB gzipped) loads only when it is needed:
+  // catalog open, the empty-state quick picks, or editing an indexer that is not configured yet.
+  const indexersQ = useQuery({ queryKey: qk.indexersConfigured, queryFn: api.configuredIndexers, staleTime: INDEXERS_STALE_MS });
+  const configured = useMemo(() => indexersQ.data ?? [], [indexersQ.data]);
+  const needCatalog =
+    search.add !== undefined ||
+    (indexersQ.isSuccess && configured.length === 0) ||
+    (search.edit !== undefined && indexersQ.isSuccess && !configured.some((x) => x.id === search.edit));
+  const catalogQ = useQuery({ queryKey: qk.indexersAll, queryFn: api.indexers, staleTime: INDEXERS_STALE_MS, enabled: needCatalog });
   const configQ = useQuery({ queryKey: qk.serverConfig, queryFn: api.serverConfig, staleTime: INDEXERS_STALE_MS });
   const apiKey = configQ.data?.api_key || getApiKey();
 
-  const all = useMemo(() => indexersQ.data ?? [], [indexersQ.data]);
-  const configured = useMemo(() => all.filter((x) => x.configured), [all]);
-  const unconfigured = useMemo(() => all.filter((x) => !x.configured), [all]);
+  const all = useMemo(() => catalogQ.data ?? configured, [catalogQ.data, configured]);
+  const unconfigured = useMemo(() => (catalogQ.data ?? []).filter((x) => !x.configured), [catalogQ.data]);
 
   const [filter, setFilter] = useState("");
   const [onlyErrors, setOnlyErrors] = useState(false);
@@ -155,7 +162,7 @@ export function IndexersPage() {
       title="Трекеры"
       description={
         indexersQ.data
-          ? `Подключено: ${configured.length} из ${all.length}${errorCount ? ` · с ошибкой: ${errorCount}` : ""}`
+          ? `Подключено: ${configured.length}${catalogQ.data ? ` из ${catalogQ.data.length}` : ""}${errorCount ? ` · с ошибкой: ${errorCount}` : ""}`
           : "Трекеры, через которые ищет Jackett"
       }
       actions={
@@ -173,8 +180,8 @@ export function IndexersPage() {
                 Проверить все
               </Button>
             ))}
-          <Button onClick={openCatalog} disabled={!indexersQ.data}>
-            <Plus />
+          <Button onClick={openCatalog} disabled={search.add !== undefined && catalogQ.isFetching}>
+            {search.add !== undefined && catalogQ.isFetching ? <Loader2 className="animate-spin" /> : <Plus />}
             Добавить трекер
           </Button>
         </>
@@ -274,7 +281,7 @@ export function IndexersPage() {
       {body}
 
       <CatalogDialog
-        open={search.add !== undefined && !!indexersQ.data}
+        open={search.add !== undefined && !!catalogQ.data}
         onOpenChange={(open) => (open ? openCatalog() : setSearch({ add: undefined }, true))}
         indexers={unconfigured}
         onPick={pick}

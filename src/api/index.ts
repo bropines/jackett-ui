@@ -152,8 +152,11 @@ export function getApiKey() {
 /* ── Endpoints ──────────────────────────────────────────────────────────── */
 
 export const api = {
-  /** All known indexers (configured and not). Large (~1.5 MB): cache it. */
+  /** All known indexers (configured and not). Large (~1.5 MB, ~400 KB gzipped): load only for the catalog. */
   indexers: () => request<IndexerSummary[]>(`${BASE}/indexers`),
+
+  /** Configured indexers only (a few hundred bytes). Use this everywhere except the "add tracker" catalog. */
+  configuredIndexers: () => request<IndexerSummary[]>(`${BASE}/indexers?configured=true`),
 
   indexerConfig: (id: string) => request<ConfigField[]>(`${BASE}/indexers/${encodeURIComponent(id)}/config`),
 
@@ -231,7 +234,10 @@ export function localizeLink(link: string | null | undefined): string | null {
 /* ── Query keys ─────────────────────────────────────────────────────────── */
 
 export const qk = {
+  /** Prefix: invalidate this after add/edit/delete, it covers both lists below. */
   indexers: ["indexers"] as const,
+  indexersAll: ["indexers", "all"] as const,
+  indexersConfigured: ["indexers", "configured"] as const,
   indexerConfig: (id: string) => ["indexer-config", id] as const,
   serverConfig: ["server-config"] as const,
   logs: ["logs"] as const,

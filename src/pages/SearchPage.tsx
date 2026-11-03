@@ -58,7 +58,7 @@ export function SearchPage() {
     setText(q);
   }
 
-  const indexersQ = useQuery({ queryKey: qk.indexers, queryFn: api.indexers, staleTime: SEARCH_STALE });
+  const indexersQ = useQuery({ queryKey: qk.indexersConfigured, queryFn: api.configuredIndexers, staleTime: SEARCH_STALE });
   const configured = useMemo(
     () => (indexersQ.data ?? []).filter((i) => i.configured).sort((a, b) => a.name.localeCompare(b.name, "ru")),
     [indexersQ.data],
