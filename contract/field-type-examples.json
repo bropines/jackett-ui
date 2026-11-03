@@ -1,0 +1,62 @@
+{
+ "inputstring": {
+  "id": "sitelink",
+  "type": "inputstring",
+  "name": "Site Link",
+  "value": "https://losslessclub.com/"
+ },
+ "displayinfo": {
+  "id": "aboutlosslessclubforumversuslosslessclubtracker",
+  "type": "displayinfo",
+  "name": "About LosslessClub Forum versus LosslessClub Tracker",
+  "value": "The <a href=\"https://losslessclub.com/\" target=\"_blank\">LosslessClub Forum</a> credentials are different from the <a href=\"https://losslessclub.com/login.php\" target=\"_blank\">LosslessClub Tracker</a> credentials so if the indexer is giving you 'Error Username or password is incorrect' then you are likely using the Forum credentials to access the Tracker."
+ },
+ "inputtags": {
+  "id": "tags",
+  "type": "inputtags",
+  "name": "Tags",
+  "value": "",
+  "separator": ",",
+  "delimiters": "[^A-Za-z0-9\\-\\._~]+",
+  "pattern": "^[A-Za-z0-9\\-\\._~]+$"
+ },
+ "inputbool": {
+  "id": "searchfreeleechonly",
+  "type": "inputbool",
+  "name": "Search freeleech only",
+  "value": false
+ },
+ "inputselect": {
+  "id": "sortrequestedfromsite",
+  "type": "inputselect",
+  "name": "Sort requested from site",
+  "value": "created_at",
+  "options": {
+   "created_at": "created",
+   "seeders": "seeders",
+   "size": "size",
+   "name": "title"
+  }
+ },
+ "inputcheckbox": {
+  "id": "releasetype",
+  "type": "inputcheckbox",
+  "name": "Release Type",
+  "values": [
+   "P2P",
+   "Scene",
+   "O-Scene"
+  ],
+  "options": {
+   "P2P": "P2P",
+   "Scene": "Scene",
+   "O-Scene": "O-Scene"
+  }
+ },
+ "displayimage": {
+  "id": "captchaimage",
+  "type": "displayimage",
+  "name": "Captcha Image",
+  "value": null
+ }
+}
