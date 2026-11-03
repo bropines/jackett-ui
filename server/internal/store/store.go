@@ -82,6 +82,8 @@ type Provider struct {
 	Scopes        string   `json:"scopes,omitempty"`
 	AllowedGroups []string `json:"allowedGroups,omitempty"`
 	GroupsClaim   string   `json:"groupsClaim,omitempty"`
+	// AllowUnverifiedEmail (oidc only): accept email_verified=false for AllowedEmails.
+	AllowUnverifiedEmail bool `json:"allowUnverifiedEmail,omitempty"`
 	// VerifiedHash is the hash of the issuer/client/secret/scopes combination
 	// that passed the settings "test login". The provider is verified when
 	// the hash of the current values equals it.

@@ -46,6 +46,7 @@ func NormalizeMode(m string) string {
 type EnvProvider struct {
 	Issuer, ClientID, ClientSecret, Name, Scopes, GroupsClaim *string
 	Groups                                                    *[]string
+	AllowUnverifiedEmail                                      *bool
 }
 
 // Field is a value plus where it came from.
@@ -77,7 +78,9 @@ type Provider struct {
 	Scopes       Field[string]
 	Groups       Field[[]string] // oidc only
 	GroupsClaim  Field[string]   // oidc only
-	VerifiedHash string
+	// AllowUnverifiedEmail: oidc only; accept email_verified=false for the e-mail allow-list.
+	AllowUnverifiedEmail Field[bool]
+	VerifiedHash         string
 }
 
 // Enabled: the provider has a client id (and, for oidc, an issuer).
@@ -199,15 +202,18 @@ func Resolve(env *Env, s store.Settings) (Effective, error) {
 			p.Scopes = pick(ev.Scopes, "OIDC_SCOPES", sp.Scopes, sp.Scopes != "", DefaultScopes)
 			p.Groups = pick(ev.Groups, "OIDC_ALLOWED_GROUPS", nonNil(sp.AllowedGroups), true, []string{})
 			p.GroupsClaim = pick(ev.GroupsClaim, "OIDC_GROUPS_CLAIM", sp.GroupsClaim, sp.GroupsClaim != "", DefaultGroupsClaim)
+			p.AllowUnverifiedEmail = pick(ev.AllowUnverifiedEmail, "OIDC_ALLOW_UNVERIFIED_EMAIL", sp.AllowUnverifiedEmail, true, false)
 		case ProviderGoogle:
 			p.Issuer = fixed(GoogleIssuer)
 			p.Name = fixed("Google")
 			p.Scopes = fixed(DefaultScopes)
 			p.Groups = fixed([]string{})
+			p.AllowUnverifiedEmail = fixed(false)
 		case ProviderGitHub:
 			p.Name = fixed("GitHub")
 			p.Scopes = fixed("read:user user:email")
 			p.Groups = fixed([]string{})
+			p.AllowUnverifiedEmail = fixed(false)
 		}
 		e.Providers[id] = p
 	}

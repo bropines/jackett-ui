@@ -209,6 +209,14 @@ func ParseEnv(lookup Lookup) (*Env, error) {
 		Groups:       list("OIDC_ALLOWED_GROUPS"),
 		GroupsClaim:  str("OIDC_GROUPS_CLAIM"),
 	}
+	if v, ok := get("OIDC_ALLOW_UNVERIFIED_EMAIL"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			fail("OIDC_ALLOW_UNVERIFIED_EMAIL: %q is not a boolean", v)
+		} else {
+			po.AllowUnverifiedEmail = &b
+		}
+	}
 	if po.Issuer != nil {
 		if _, err := parseBaseURL(*po.Issuer, false); err != nil {
 			fail("OIDC_ISSUER: %v", err)

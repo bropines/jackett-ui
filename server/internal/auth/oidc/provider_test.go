@@ -667,3 +667,26 @@ func TestDiscoveryFailure(t *testing.T) {
 		t.Fatal("want issuer mismatch error")
 	}
 }
+
+// AllowUnverifiedEmail lets email_verified=false match the e-mail allow-list (own IdP, e.g. Authentik).
+func TestAllowUnverifiedEmail(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		idp := newFakeIdP(t)
+		cfg := testConfig(idp)
+		cfg.AllowedEmails = []string{"user@example.com"}
+		cfg.AllowedGroups = nil
+		cfg.AllowUnverifiedEmail = allow
+		p := mustNew(t, cfg)
+		_, err, _ := login(t, idp, p, func(c map[string]any) {
+			c["email"] = "user@example.com"
+			c["email_verified"] = false
+			delete(c, "groups")
+		})
+		if allow && err != nil {
+			t.Errorf("allow=true: %v", err)
+		}
+		if !allow && !errors.Is(err, ErrNotAllowed) {
+			t.Errorf("allow=false: err = %v, want ErrNotAllowed", err)
+		}
+	}
+}

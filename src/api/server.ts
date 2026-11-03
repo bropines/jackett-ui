@@ -46,6 +46,8 @@ export interface OidcProviderSettings extends ProviderSettingsBase {
   scopes: Locked<string>;
   allowedGroups: Locked<string[]>;
   groupsClaim: Locked<string>;
+  /** Accept email_verified=false for the e-mail allow-list (own IdP). */
+  allowUnverifiedEmail?: Locked<boolean>;
 }
 
 /** `GET /_ui/api/settings` */
@@ -82,6 +84,7 @@ export interface ProviderFields {
   scopes?: string;
   allowedGroups?: string[];
   groupsClaim?: string;
+  allowUnverifiedEmail?: boolean;
 }
 
 /** `PUT /_ui/api/settings`: partial, omitted = unchanged. */

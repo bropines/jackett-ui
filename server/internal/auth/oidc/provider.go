@@ -342,7 +342,7 @@ func (p *provider) finish(w http.ResponseWriter, r *http.Request, s Signer, secu
 	}
 
 	verified, present := boolClaim(c.EmailVerified)
-	emailUsable := id.Email != "" && (!present || verified)
+	emailUsable := id.Email != "" && (!present || verified || p.cfg.AllowUnverifiedEmail)
 	if err := p.checkAllowed(id, emailUsable); err != nil {
 		return Result{}, err
 	}

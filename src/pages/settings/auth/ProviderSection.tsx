@@ -6,6 +6,8 @@ import { Callout, CopyField, Field } from "@/components/common";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/misc";
 import { lockedHint, P, type AuthErrors, type ProviderForm } from "@/pages/settings/auth/logic";
 import { SecretInput } from "@/pages/settings/parts";
 
@@ -162,6 +164,21 @@ export function ProviderSection({
             <Field label="Claim с группами" htmlFor="auth-oidc-groupsClaim" error={errors[path("groupsClaim")]} hint={lockHint("groupsClaim")}>
               <Input {...text("groupsClaim", { placeholder: "groups" })} />
             </Field>
+            <div className="flex items-start justify-between gap-3 sm:col-span-2">
+              <div className="min-w-0">
+                <Label htmlFor="auth-oidc-allowUnverifiedEmail">Принимать неподтверждённую почту</Label>
+                <p className="text-xs text-muted-foreground">
+                  {lockHint("allowUnverifiedEmail") ??
+                    "Для своего провайдера: Authentik по умолчанию отдаёт email_verified=false. Включайте, только если пользователи не могут сами менять почту"}
+                </p>
+              </div>
+              <Switch
+                id="auth-oidc-allowUnverifiedEmail"
+                checked={form.allowUnverifiedEmail}
+                onCheckedChange={(v) => onChange({ allowUnverifiedEmail: v })}
+                disabled={locked("allowUnverifiedEmail")}
+              />
+            </div>
           </>
         )}
       </div>

@@ -26,7 +26,7 @@ import (
 )
 
 // version is set with -ldflags "-X main.version=…".
-var version = "0.2.0"
+var version = "0.2.1"
 
 func main() {
 	// `jackett-ui healthcheck`: for Docker HEALTHCHECK in images without a shell or curl.

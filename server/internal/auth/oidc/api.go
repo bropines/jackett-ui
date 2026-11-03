@@ -22,7 +22,10 @@ type Config struct {
 	AllowedEmails []string // empty: any user of the IdP
 	AllowedGroups []string // empty: no group check
 	GroupsClaim   string   // default: groups
-	RedirectURL   string   // absolute, …/_ui/auth/oidc/callback
+	// AllowUnverifiedEmail lets an e-mail with email_verified=false match
+	// AllowedEmails (for your own IdP, e.g. Authentik, which sends false by default).
+	AllowUnverifiedEmail bool
+	RedirectURL          string // absolute, …/_ui/auth/oidc/callback
 }
 
 // Identity is the result of a successful login.

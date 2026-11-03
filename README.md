@@ -111,6 +111,7 @@ Everything is optional. Environment variables win over the settings made in the 
 | `AUTH_PASSWORD_FALLBACK` | `true` | keep the password login next to SSO |
 | `AUTH_ALLOWED_EMAILS`, `GITHUB_USERS` | | who may log in with SSO |
 | `OIDC_*`, `GOOGLE_*`, `GITHUB_*` | | SSO providers (table above); also `OIDC_SCOPES`, `OIDC_ALLOWED_GROUPS`, `OIDC_GROUPS_CLAIM` |
+| `OIDC_ALLOW_UNVERIFIED_EMAIL` | `false` | accept `email_verified=false` from your own OIDC provider for `AUTH_ALLOWED_EMAILS` (Authentik sends false by default). Google and GitHub stay strict |
 | `AUTH_HEADER_NAME`, `AUTH_HEADER_TRUSTED` | `Remote-User`, — | header mode |
 | `SESSION_TTL` | `168h` | how long a login lasts |
 | `AUTH_RESET` | | `1` resets the login settings on start (remove it afterwards) |

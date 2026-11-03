@@ -44,7 +44,7 @@ jackett:
 ui:
   image:
     repository: ghcr.io/bropines/jackett-ui
-    tag: "0.2.0"
+    tag: "0.2.1"
     pullPolicy: IfNotPresent
   # Plain settings for the UI server (see the README "Configuration" table), e.g.
   #   AUTH_MODE: sso

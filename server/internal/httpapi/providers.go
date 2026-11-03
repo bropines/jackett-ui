@@ -9,6 +9,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +80,7 @@ func (s *Server) oidcFactory(ctx context.Context, p config.Provider, eff config.
 	if p.ID == config.ProviderOIDC {
 		cfg.AllowedGroups = p.Groups.Value
 		cfg.GroupsClaim = p.GroupsClaim.Value
+		cfg.AllowUnverifiedEmail = p.AllowUnverifiedEmail.Value
 	}
 	if len(cfg.AllowedEmails) == 0 && len(cfg.AllowedGroups) == 0 {
 		// Never hand the oidc package empty lists: that means "anyone".
@@ -160,7 +162,7 @@ type provEntry struct {
 
 func providerKey(p config.Provider, eff config.Effective, redirect string) string {
 	h := sha256.New()
-	for _, v := range []string{p.ID, p.Hash(), redirect, p.GroupsClaim.Value,
+	for _, v := range []string{p.ID, p.Hash(), redirect, p.GroupsClaim.Value, strconv.FormatBool(p.AllowUnverifiedEmail.Value),
 		strings.Join(p.Groups.Value, ","), strings.Join(eff.AllowedEmails.Value, ","), strings.Join(eff.GitHubUsers.Value, ",")} {
 		h.Write([]byte(v))
 		h.Write([]byte{0})

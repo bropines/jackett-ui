@@ -49,6 +49,7 @@ func (s *Server) settingsView(r *http.Request, re *reqEnv) map[string]any {
 			v["scopes"] = fv(p.Scopes)
 			v["allowedGroups"] = fv(p.Groups)
 			v["groupsClaim"] = fv(p.GroupsClaim)
+			v["allowUnverifiedEmail"] = fv(p.AllowUnverifiedEmail)
 		}
 		providers[id] = v
 	}
@@ -96,6 +97,8 @@ type putProvider struct {
 	Scopes        opt[string]   `json:"scopes"`
 	AllowedGroups opt[[]string] `json:"allowedGroups"`
 	GroupsClaim   opt[string]   `json:"groupsClaim"`
+	// AllowUnverifiedEmail (oidc only).
+	AllowUnverifiedEmail opt[bool] `json:"allowUnverifiedEmail"`
 }
 
 type putPassword struct {
@@ -266,7 +269,7 @@ func applyProvider(id string, in *putProvider, cur config.Provider, sp *store.Pr
 	pre := "auth.providers." + id + "."
 	if id != config.ProviderOIDC {
 		for name, set := range map[string]bool{"issuer": in.Issuer.Set, "providerName": in.ProviderName.Set, "scopes": in.Scopes.Set,
-			"allowedGroups": in.AllowedGroups.Set, "groupsClaim": in.GroupsClaim.Set} {
+			"allowedGroups": in.AllowedGroups.Set, "groupsClaim": in.GroupsClaim.Set, "allowUnverifiedEmail": in.AllowUnverifiedEmail.Set} {
 			if set {
 				return badField(pre+name, "Поле не поддерживается этим провайдером")
 			}
@@ -292,6 +295,19 @@ func applyProvider(id string, in *putProvider, cur config.Provider, sp *store.Pr
 	}
 	if err := applyString(pre+"groupsClaim", in.GroupsClaim, cur.GroupsClaim, &sp.GroupsClaim, false, textValidator(pre+"groupsClaim", 128)); err != nil {
 		return err
+	}
+	if o := in.AllowUnverifiedEmail; o.Set {
+		f := cur.AllowUnverifiedEmail
+		switch {
+		case f.Locked:
+			if o.Null || o.V != f.Value {
+				return lockedErr(pre+"allowUnverifiedEmail", f.Env)
+			}
+		case o.Null:
+			sp.AllowUnverifiedEmail = false
+		default:
+			sp.AllowUnverifiedEmail = o.V
+		}
 	}
 	return applyList(pre+"allowedGroups", in.AllowedGroups, cur.Groups, &sp.AllowedGroups, nil)
 }

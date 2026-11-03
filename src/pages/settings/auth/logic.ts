@@ -30,6 +30,7 @@ export interface ProviderForm {
   /** Comma/newline separated. */
   allowedGroups: string;
   groupsClaim: string;
+  allowUnverifiedEmail: boolean;
 }
 
 export interface AuthForm {
@@ -85,6 +86,7 @@ export const ENV_VARS: Record<FieldPath, string> = {
   "auth.providers.oidc.scopes": "OIDC_SCOPES",
   "auth.providers.oidc.allowedGroups": "OIDC_ALLOWED_GROUPS",
   "auth.providers.oidc.groupsClaim": "OIDC_GROUPS_CLAIM",
+  "auth.providers.oidc.allowUnverifiedEmail": "OIDC_ALLOW_UNVERIFIED_EMAIL",
   "auth.providers.google.clientId": "GOOGLE_CLIENT_ID",
   "auth.providers.google.clientSecret": "GOOGLE_CLIENT_SECRET",
   "auth.providers.github.clientId": "GITHUB_CLIENT_ID",
@@ -147,6 +149,7 @@ function providerForm(s: UiSettings, id: ProviderId): ProviderForm {
     scopes: o?.scopes.value ?? "",
     allowedGroups: joinList(o?.allowedGroups.value),
     groupsClaim: o?.groupsClaim.value ?? "",
+    allowUnverifiedEmail: o?.allowUnverifiedEmail?.value ?? false,
   };
 }
 
@@ -183,6 +186,7 @@ export function providerFields(f: AuthForm, id: ProviderId): ProviderFields {
     out.scopes = p.scopes.trim();
     out.allowedGroups = parseList(p.allowedGroups);
     out.groupsClaim = p.groupsClaim.trim();
+    out.allowUnverifiedEmail = p.allowUnverifiedEmail;
   }
   if (p.clearSecret) out.clientSecret = null;
   else if (p.clientSecret) out.clientSecret = p.clientSecret;
@@ -283,6 +287,8 @@ export function buildPatch(f: AuthForm, s: UiSettings): UiSettingsPatch {
       str("groupsClaim", o.groupsClaim.value);
       const groups = parseList(p.allowedGroups);
       if (free(P.provider(id, "allowedGroups")) && !sameList(groups, o.allowedGroups.value)) out.allowedGroups = groups;
+      if (free(P.provider(id, "allowUnverifiedEmail")) && p.allowUnverifiedEmail !== (o.allowUnverifiedEmail?.value ?? false))
+        out.allowUnverifiedEmail = p.allowUnverifiedEmail;
     }
     if (Object.keys(out).length) providers[id] = out;
   }
