@@ -1,20 +1,19 @@
 /**
  * Jackett API client.
  *
- * Auth model: Jackett's UI endpoints use a session cookie ("Jackett"). With the
- * `X-Requested-With` header Jackett answers 401 instead of redirecting to /UI/Login.
- * On 401 we log in with POST /UI/Dashboard (form field `password`); when no admin
- * password is set an empty password works, so the UI is "just there" behind an
- * external auth layer (SSO). If a password is set, `needsPassword` is raised and
- * the app shows the login page.
+ * All Jackett calls go through the jackett-ui server, which logs in to Jackett itself
+ * (server-side cookie, JACKETT_PASSWORD) and puts its own authentication in front.
+ * The browser only holds our session cookie: a 401 or `{error:"setup_required"}` from any
+ * call means that session is gone, so the auth gate is told to re-check
+ * /_ui/api/auth/state (see `onAuthRecheck`).
  *
  * Search/download endpoints use the API key instead (`apikey=`), see `searchUrl`.
  */
+import { ApiError, errorFromResponse, isAuthProxyRedirect, maybeRecheck } from "@/api/http";
 import type {
   CacheEntry,
   ConfigField,
   IndexerSummary,
-  JackettErrorBody,
   LogEntry,
   SearchParams,
   SearchResponse,
@@ -24,67 +23,10 @@ import type {
 import { SERVER_CONFIG_READONLY } from "@/api/types";
 
 export * from "@/api/types";
+export { ApiError, emitAuthRecheck, errText, onAuthRecheck, type ServerErrorBody } from "@/api/http";
+export * from "@/api/server";
 
 const BASE = "/api/v2.0";
-
-export class ApiError extends Error {
-  status: number;
-  body?: JackettErrorBody;
-  constructor(status: number, message: string, body?: JackettErrorBody) {
-    super(message);
-    this.status = status;
-    this.body = body;
-  }
-}
-
-/** Human-readable error text for toasts and error states. */
-export function errText(err: unknown): string {
-  if (err instanceof ApiError) return err.message || `HTTP ${err.status}`;
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
-/* ── Session ────────────────────────────────────────────────────────────── */
-
-type Listener = (needsPassword: boolean) => void;
-const listeners = new Set<Listener>();
-let needsPassword = false;
-
-export function onNeedsPassword(fn: Listener): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-export function getNeedsPassword() {
-  return needsPassword;
-}
-function setNeedsPassword(v: boolean) {
-  if (needsPassword === v) return;
-  needsPassword = v;
-  listeners.forEach((l) => l(v));
-}
-
-/**
- * Logs in to Jackett. Returns true when the session cookie works afterwards.
- * Jackett answers 302 either way, so success is checked with a probe request.
- */
-export async function login(password = ""): Promise<boolean> {
-  await fetch("/UI/Dashboard", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ password }),
-    redirect: "manual",
-    credentials: "same-origin",
-  });
-  const probe = await rawFetch(`${BASE}/server/config`);
-  const ok = probe.ok;
-  setNeedsPassword(!ok);
-  return ok;
-}
-
-export async function logout(): Promise<void> {
-  await fetch("/UI/Logout", { redirect: "manual", credentials: "same-origin" });
-  setNeedsPassword(true);
-}
 
 /* ── Transport ──────────────────────────────────────────────────────────── */
 
@@ -95,37 +37,17 @@ function rawFetch(url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...init, headers, credentials: "same-origin", redirect: "manual" });
 }
 
-/**
- * An external auth proxy (oauth2-proxy & co) answers an expired session with a
- * redirect to the IdP. fetch() can't follow that cross-origin, so reload the page
- * and let the browser do the login round-trip.
- */
-function isAuthProxyRedirect(res: Response): boolean {
-  return res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400);
-}
-
-let loginInFlight: Promise<boolean> | null = null;
-
 async function request<T>(url: string, init: RequestInit = {}, parse: "json" | "text" | "none" = "json"): Promise<T> {
-  let res = await rawFetch(url, init);
-  if (res.status === 401) {
-    loginInFlight ??= login("").finally(() => (loginInFlight = null));
-    if (await loginInFlight) res = await rawFetch(url, init);
-  }
+  const res = await rawFetch(url, init);
   if (isAuthProxyRedirect(res)) {
     window.location.reload();
     throw new ApiError(401, "Сессия истекла, перезагружаю страницу…");
   }
-  if (res.status === 401) throw new ApiError(401, "Нужен пароль Jackett");
   if (!res.ok) {
-    let body: JackettErrorBody | undefined;
-    const text = await res.text().catch(() => "");
-    try {
-      body = JSON.parse(text) as JackettErrorBody;
-    } catch {
-      /* not JSON */
-    }
-    throw new ApiError(res.status, body?.error ?? (text.slice(0, 300) || `HTTP ${res.status}`), body);
+    const err = await errorFromResponse(res);
+    if (res.status === 401 && !err.code) err.message = "Сессия истекла, войдите снова";
+    maybeRecheck(err);
+    throw err;
   }
   if (parse === "none" || res.status === 204) return undefined as T;
   if (parse === "text") return (await res.text()) as T;
@@ -182,8 +104,6 @@ export const api = {
     return request<void>(`${BASE}/server/config`, json("POST", body), "none");
   },
 
-  /** Sets the admin password ("" removes it). */
-  setAdminPassword: (password: string) => request<void>(`${BASE}/server/adminpassword`, json("POST", password), "none"),
 
   logs: () => request<LogEntry[]>(`${BASE}/server/logs`),
 
@@ -242,4 +162,8 @@ export const qk = {
   serverConfig: ["server-config"] as const,
   logs: ["logs"] as const,
   cache: ["cache"] as const,
+  /** jackett-ui server: GET /_ui/api/auth/state */
+  authState: ["auth-state"] as const,
+  /** jackett-ui server: GET /_ui/api/settings */
+  uiSettings: ["ui-settings"] as const,
 };

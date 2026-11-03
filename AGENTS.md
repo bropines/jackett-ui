@@ -14,7 +14,7 @@ npm run build
 ```
 Do not run `npm install`/`npm ci` concurrently with someone else. If you need a new dependency, say so in your report instead of installing it.
 
-`npm run dev` proxies `/api`, `/dl`, `/bh`, `/UI` to `JACKETT_URL` (default `http://127.0.0.1:9117`).
+`npm run dev` proxies `/api`, `/dl`, `/bh`, `/UI`, `/_ui`, `/healthz` to the jackett-ui Go server at `UI_SERVER_URL` (default `http://127.0.0.1:8080`), which handles auth and talks to Jackett (see `docs/server-spec.md`).
 
 ## API contract
 - `src/api/types.ts`: types for every response, taken from live Jackett v0.24.

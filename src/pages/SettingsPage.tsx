@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { AdminPasswordCard } from "@/pages/settings/AdminPasswordCard";
+import { AuthSettingsCard } from "@/pages/settings/auth/AuthSettingsCard";
+import { JackettPasswordCard } from "@/pages/settings/JackettPasswordCard";
 import {
   fromForm,
   hasErrors,
@@ -336,7 +337,9 @@ export function SettingsPage() {
 
       </form>
 
-      <AdminPasswordCard />
+      <AuthSettingsCard />
+
+      <JackettPasswordCard />
 
         {(dirty || saving) && (
           <div

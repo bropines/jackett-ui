@@ -1,11 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type ServerConfig } from "@/api";
+import { api, serverApi, type ServerConfig } from "@/api";
 import { TooltipProvider } from "@/components/ui/misc";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { authState, uiSettings } from "@/test/fixtures/auth";
 
 const cfg: ServerConfig = {
   notices: [],
@@ -53,20 +54,22 @@ beforeEach(() => {
 describe("SettingsPage", () => {
   it("saves the whole config and blocks invalid input", async () => {
     vi.spyOn(api, "serverConfig").mockResolvedValue(cfg);
+    vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettings());
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
     const save = vi.spyOn(api, "saveServerConfig").mockResolvedValue(undefined);
     const user = userEvent.setup();
     wrap(<SettingsPage />);
 
     const fs = await screen.findByLabelText("Адрес", { selector: "#cfg-flaresolverrurl" });
-    expect(screen.queryByRole("button", { name: /Сохранить$/ })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Несохранённые изменения" })).toBeNull();
 
     await user.type(fs, "flaresolverr:8191");
     expect(await screen.findByText("Адрес вида http://host:8191")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Сохранить$/ })).toBeDisabled();
+    expect(within(screen.getByRole("region", { name: "Несохранённые изменения" })).getByRole("button", { name: /^Сохранить$/ })).toBeDisabled();
 
     await user.clear(fs);
     await user.type(fs, "http://flaresolverr:8191");
-    const btn = screen.getByRole("button", { name: /^Сохранить$/ });
+    const btn = within(screen.getByRole("region", { name: "Несохранённые изменения" })).getByRole("button", { name: /^Сохранить$/ });
     expect(btn).toBeEnabled();
     await user.click(btn);
 

@@ -1,0 +1,337 @@
+package config
+
+import (
+	"log/slog"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bropines/jackett-ui/server/internal/auth"
+	"github.com/bropines/jackett-ui/server/internal/store"
+)
+
+func lookup(m map[string]string) Lookup {
+	return func(k string) (string, bool) {
+		v, ok := m[k]
+		return v, ok
+	}
+}
+
+func TestParseEnvDefaults(t *testing.T) {
+	e, err := ParseEnv(lookup(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Listen != ":8080" || e.JackettURL.String() != "http://127.0.0.1:9117" || e.DataDir != "/config" ||
+		len(e.TrustedProxies) != 2 || e.AuthMode != "" || e.PasswordHash != "" || e.SessionTTL != 0 ||
+		e.LogLevel != slog.LevelInfo || e.AuthReset || e.PublicURL != nil || len(e.Set) != 0 {
+		t.Fatalf("unexpected defaults: %+v", e)
+	}
+}
+
+func TestParseEnvValid(t *testing.T) {
+	hash, _ := auth.HashPassword("hunter22hunter")
+	cases := []struct {
+		name  string
+		env   map[string]string
+		check func(t *testing.T, e *Env)
+	}{
+		{"jackett url with path", map[string]string{"JACKETT_URL": "http://jackett:9117/jackett/"}, func(t *testing.T, e *Env) {
+			if e.JackettURL.Path != "/jackett" {
+				t.Fatalf("path %q", e.JackettURL.Path)
+			}
+		}},
+		{"empty values count as unset", map[string]string{"AUTH_MODE": "", "LISTEN": "  "}, func(t *testing.T, e *Env) {
+			if e.AuthMode != "" || e.Listen != ":8080" {
+				t.Fatal("empty value was used")
+			}
+		}},
+		{"plain password is hashed", map[string]string{"AUTH_PASSWORD": "s3cret pass"}, func(t *testing.T, e *Env) {
+			if e.PasswordVar != "AUTH_PASSWORD" || !auth.CheckPassword(e.PasswordHash, "s3cret pass") {
+				t.Fatal("password not hashed")
+			}
+		}},
+		{"hash", map[string]string{"AUTH_PASSWORD_HASH": hash}, func(t *testing.T, e *Env) {
+			if e.PasswordHash != hash {
+				t.Fatal("hash not taken")
+			}
+		}},
+		{"legacy oidc mode", map[string]string{"AUTH_MODE": "OIDC"}, func(t *testing.T, e *Env) {
+			if e.AuthMode != auth.ModeSSO {
+				t.Fatalf("mode %q", e.AuthMode)
+			}
+		}},
+		{"header mode", map[string]string{"AUTH_MODE": "header", "AUTH_HEADER_TRUSTED": "172.16.0.0/12, 10.0.0.1"}, func(t *testing.T, e *Env) {
+			if len(*e.HeaderTrusted) != 2 {
+				t.Fatal("trusted not parsed")
+			}
+		}},
+		{"providers and lists", map[string]string{
+			"OIDC_ISSUER": "https://auth.example.com/application/o/jackett/", "OIDC_CLIENT_ID": "abc", "OIDC_CLIENT_SECRET": " sec ",
+			"GOOGLE_CLIENT_ID": "g", "GITHUB_CLIENT_ID": "gh", "GITHUB_CLIENT_SECRET": "ghs",
+			"AUTH_ALLOWED_EMAILS": "a@x.com, ,b@x.com", "GITHUB_USERS": "Octo", "OIDC_ALLOWED_GROUPS": "admins",
+		}, func(t *testing.T, e *Env) {
+			if *e.Providers["oidc"].ClientSecret != " sec " {
+				t.Fatal("secret must not be trimmed")
+			}
+			if !slices.Equal(*e.AllowedEmails, []string{"a@x.com", "b@x.com"}) || (*e.GitHubUsers)[0] != "Octo" {
+				t.Fatalf("lists: %v %v", *e.AllowedEmails, *e.GitHubUsers)
+			}
+			if slices.Contains(e.Set, "") {
+				t.Fatal("empty var name in Set")
+			}
+		}},
+		{"misc", map[string]string{"SESSION_TTL": "24h", "LOG_LEVEL": "debug", "AUTH_RESET": "1", "PUBLIC_URL": "https://J.example.com/", "AUTH_PASSWORD_FALLBACK": "false"}, func(t *testing.T, e *Env) {
+			if e.SessionTTL != 24*time.Hour || e.LogLevel != slog.LevelDebug || !e.AuthReset || e.PublicURL.String() != "https://j.example.com" || *e.PasswordFallback {
+				t.Fatalf("%+v", e)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e, err := ParseEnv(lookup(c.env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.check(t, e)
+			// Secret values never appear in Set (only names).
+			for _, n := range e.Set {
+				if strings.ContainsAny(n, " @:/") {
+					t.Fatalf("Set contains a value: %q", n)
+				}
+			}
+		})
+	}
+}
+
+func TestParseEnvInvalid(t *testing.T) {
+	cases := map[string]map[string]string{
+		"bad mode":                {"AUTH_MODE": "ldap"},
+		"header without trusted":  {"AUTH_MODE": "header"},
+		"bad header trusted":      {"AUTH_HEADER_TRUSTED": "10.0.0.0/99"},
+		"bad header name":         {"AUTH_HEADER_NAME": "Remote User"},
+		"both passwords":          {"AUTH_PASSWORD": "longenough", "AUTH_PASSWORD_HASH": "$2a$12$x"},
+		"short password":          {"AUTH_PASSWORD": "short"},
+		"bad hash":                {"AUTH_PASSWORD_HASH": "plaintext"},
+		"bad jackett url":         {"JACKETT_URL": "jackett:9117"},
+		"jackett url with creds":  {"JACKETT_URL": "http://u:p@jackett"},
+		"public url with path":    {"PUBLIC_URL": "https://x.com/jackett"},
+		"public url no scheme":    {"PUBLIC_URL": "x.com"},
+		"bad trusted proxies":     {"TRUSTED_PROXIES": "localhost"},
+		"bad ttl":                 {"SESSION_TTL": "a week"},
+		"ttl too short":           {"SESSION_TTL": "1m"},
+		"bad fallback":            {"AUTH_PASSWORD_FALLBACK": "maybe"},
+		"bad reset":               {"AUTH_RESET": "yes please"},
+		"bad log level":           {"LOG_LEVEL": "loud"},
+		"bad issuer":              {"OIDC_ISSUER": "auth.example.com"},
+		"github without secret":   {"GITHUB_CLIENT_ID": "x"},
+		"removed oidc email list": {"OIDC_ALLOWED_EMAILS": "a@b.c"},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseEnv(lookup(env)); err == nil {
+				t.Fatal("want error")
+			}
+		})
+	}
+	// All errors are reported at once.
+	_, err := ParseEnv(lookup(map[string]string{"AUTH_MODE": "x", "LOG_LEVEL": "y"}))
+	if err == nil || !strings.Contains(err.Error(), "AUTH_MODE") || !strings.Contains(err.Error(), "LOG_LEVEL") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func mustEnv(t *testing.T, m map[string]string) *Env {
+	t.Helper()
+	e, err := ParseEnv(lookup(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestResolveEnvWinsAndLocks(t *testing.T) {
+	env := mustEnv(t, map[string]string{"AUTH_MODE": "sso", "OIDC_ISSUER": "https://idp.example", "OIDC_CLIENT_ID": "envid", "SESSION_TTL": "2h", "AUTH_ALLOWED_EMAILS": "a@b.c"})
+	var s store.Settings
+	s.Auth.Mode = "password"
+	s.Auth.Providers.OIDC = store.Provider{Issuer: "https://stored", ClientID: "storedid", ClientSecret: "storedsecret", ProviderName: "Authentik"}
+	s.Auth.AllowedEmails = []string{"stored@x"}
+	s.SessionTTL = "10h"
+	e, err := Resolve(env, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := e.Providers[ProviderOIDC]
+	checks := []struct {
+		name   string
+		got    any
+		want   any
+		locked bool
+		isLock bool
+	}{
+		{"mode", e.Mode.Value, "sso", e.Mode.Locked, true},
+		{"issuer", p.Issuer.Value, "https://idp.example", p.Issuer.Locked, true},
+		{"client id", p.ClientID.Value, "envid", p.ClientID.Locked, true},
+		{"secret from file", p.ClientSecret.Value, "storedsecret", p.ClientSecret.Locked, false},
+		{"name from file", p.Name.Value, "Authentik", p.Name.Locked, false},
+		{"scopes default", p.Scopes.Value, DefaultScopes, p.Scopes.Locked, false},
+		{"ttl", e.SessionTTL.Value, 2 * time.Hour, e.SessionTTL.Locked, true},
+		{"fallback default", e.PasswordFallback.Value, true, e.PasswordFallback.Locked, false},
+		{"header name default", e.HeaderName.Value, DefaultHeaderName, e.HeaderName.Locked, false},
+	}
+	for _, c := range checks {
+		if c.got != c.want || c.locked != c.isLock {
+			t.Errorf("%s: got %v (locked %v), want %v (locked %v)", c.name, c.got, c.locked, c.want, c.isLock)
+		}
+	}
+	if !slices.Equal(e.AllowedEmails.Value, []string{"a@b.c"}) || !e.AllowedEmails.Locked || e.AllowedEmails.Env != "AUTH_ALLOWED_EMAILS" {
+		t.Fatalf("allowed emails: %+v", e.AllowedEmails)
+	}
+	if e.Providers[ProviderGoogle].Issuer.Value != GoogleIssuer {
+		t.Fatal("google issuer not fixed")
+	}
+}
+
+func TestSetupRequiredAndPasswordLogin(t *testing.T) {
+	hashEnv := mustEnv(t, map[string]string{"AUTH_PASSWORD": "longenough"})
+	cases := []struct {
+		name          string
+		env           *Env
+		mode, hash    string
+		fallback      *bool
+		setup, pwForm bool
+	}{
+		{"fresh install", mustEnv(t, nil), "", "", nil, true, false},
+		{"stored hash", mustEnv(t, nil), "", "$2a$x", nil, false, true},
+		{"env password", hashEnv, "", "", nil, false, true},
+		{"sso with fallback", mustEnv(t, nil), "sso", "$2a$x", nil, false, true},
+		{"sso without fallback", mustEnv(t, nil), "sso", "$2a$x", new(bool), false, false},
+		{"sso without password", mustEnv(t, nil), "sso", "", nil, false, false},
+		{"header", mustEnv(t, nil), "header", "", nil, false, false},
+		{"none", mustEnv(t, nil), "none", "", nil, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var s store.Settings
+			s.Auth.Mode, s.Auth.PasswordHash, s.Auth.PasswordFallback = c.mode, c.hash, c.fallback
+			e, err := Resolve(c.env, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.SetupRequired() != c.setup || e.PasswordLogin() != c.pwForm {
+				t.Fatalf("setup=%v pwForm=%v", e.SetupRequired(), e.PasswordLogin())
+			}
+		})
+	}
+}
+
+func TestProviderVerifiedAndAllowLists(t *testing.T) {
+	env := mustEnv(t, nil)
+	var s store.Settings
+	s.Auth.Mode = "sso"
+	s.Auth.Providers.OIDC = store.Provider{Issuer: "https://idp", ClientID: "c", ClientSecret: "s"}
+	s.Auth.Providers.Google = store.Provider{ClientID: "g"}
+	e, _ := Resolve(env, s)
+	if len(e.EnabledProviders()) != 2 {
+		t.Fatalf("enabled = %d", len(e.EnabledProviders()))
+	}
+	if e.Providers["oidc"].Verified() || len(e.LoginProviders()) != 0 {
+		t.Fatal("unverified provider offered")
+	}
+	// Verify oidc.
+	s.Auth.Providers.OIDC.VerifiedHash = e.Providers["oidc"].Hash()
+	e, _ = Resolve(env, s)
+	if !e.Providers["oidc"].Verified() {
+		t.Fatal("hash match not verified")
+	}
+	if len(e.LoginProviders()) != 0 || e.AllowListSet() {
+		t.Fatal("provider offered without allow-list")
+	}
+	s.Auth.AllowedEmails = []string{"me@x"}
+	e, _ = Resolve(env, s)
+	if lp := e.LoginProviders(); len(lp) != 1 || lp[0].ID != "oidc" {
+		t.Fatalf("login providers = %+v", lp)
+	}
+	// Fields that reset verified: client id, secret, issuer, scopes.
+	for name, mut := range map[string]func(p *store.Provider){
+		"clientId": func(p *store.Provider) { p.ClientID = "c2" },
+		"secret":   func(p *store.Provider) { p.ClientSecret = "s2" },
+		"issuer":   func(p *store.Provider) { p.Issuer = "https://idp2" },
+		"scopes":   func(p *store.Provider) { p.Scopes = "openid email" },
+	} {
+		s2 := s.Clone()
+		mut(&s2.Auth.Providers.OIDC)
+		e2, _ := Resolve(env, s2)
+		if e2.Providers["oidc"].Verified() {
+			t.Errorf("%s change kept verified", name)
+		}
+	}
+	// Other fields keep it.
+	s2 := s.Clone()
+	s2.Auth.Providers.OIDC.ProviderName = "New name"
+	s2.Auth.Providers.OIDC.AllowedGroups = []string{"x"}
+	if e2, _ := Resolve(env, s2); !e2.Providers["oidc"].Verified() {
+		t.Error("name/groups change reset verified")
+	}
+	// GitHub users alone admit only github.
+	s3 := store.Settings{}
+	s3.Auth.GitHubUsers = []string{"octo"}
+	e3, _ := Resolve(env, s3)
+	if e3.ProviderCanAllow("google") || e3.ProviderCanAllow("oidc") || !e3.ProviderCanAllow("github") {
+		t.Fatal("ProviderCanAllow wrong for github users")
+	}
+}
+
+func TestProviderFromEnvCountsAsVerified(t *testing.T) {
+	env := mustEnv(t, map[string]string{"GOOGLE_CLIENT_ID": "g", "GOOGLE_CLIENT_SECRET": "s", "OIDC_CLIENT_ID": "o"})
+	var s store.Settings
+	s.Auth.Providers.OIDC.Issuer = "https://stored-issuer"
+	e, _ := Resolve(env, s)
+	if !e.Providers["google"].Verified() {
+		t.Fatal("env-only google not verified")
+	}
+	if e.Providers["oidc"].Verified() {
+		t.Fatal("oidc with stored issuer counted as env-configured")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		mode string
+		ok   bool
+	}{
+		{"password", nil, "password", true},
+		{"sso without provider", map[string]string{"AUTH_MODE": "sso"}, "", false},
+		{"sso with google", map[string]string{"AUTH_MODE": "sso", "GOOGLE_CLIENT_ID": "g"}, "", true},
+		{"stored header without trusted", nil, "header", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var s store.Settings
+			s.Auth.Mode = c.mode
+			e, err := Resolve(mustEnv(t, c.env), s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (e.Validate() == nil) != c.ok {
+				t.Fatalf("Validate = %v", e.Validate())
+			}
+		})
+	}
+	var s store.Settings
+	s.Auth.Mode = "bogus"
+	if _, err := Resolve(mustEnv(t, nil), s); err == nil {
+		t.Fatal("unknown stored mode accepted")
+	}
+}
+
+func TestSessionTTLString(t *testing.T) {
+	for d, want := range map[time.Duration]string{168 * time.Hour: "168h", 30 * time.Minute: "30m", 90 * time.Minute: "1h30m"} {
+		if got := SessionTTLString(d); got != want {
+			t.Errorf("%v → %q, want %q", d, got, want)
+		}
+	}
+}

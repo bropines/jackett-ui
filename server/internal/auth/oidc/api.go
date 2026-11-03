@@ -48,19 +48,19 @@ const FlowTTL = 10 * time.Minute
 
 // Errors returned by Finish. httpapi maps them to ?authError=<code>.
 var (
-	ErrState        = errors.New("state_mismatch")
-	ErrExchange     = errors.New("code_exchange_failed")
-	ErrToken        = errors.New("invalid_id_token")
-	ErrNonce        = errors.New("nonce_mismatch")
-	ErrNotAllowed   = errors.New("user_not_allowed")
-	ErrIdP          = errors.New("idp_error") // the IdP redirected back with ?error=
-	ErrFlowExpired  = errors.New("flow_expired")
+	ErrState         = errors.New("state_mismatch")
+	ErrExchange      = errors.New("code_exchange_failed")
+	ErrToken         = errors.New("invalid_id_token")
+	ErrNonce         = errors.New("nonce_mismatch")
+	ErrNotAllowed    = errors.New("user_not_allowed")
+	ErrIdP           = errors.New("idp_error") // the IdP redirected back with ?error=
+	ErrFlowExpired   = errors.New("flow_expired")
 	ErrNotConfigured = errors.New("oidc_not_configured")
 )
 
 // Provider is a discovered OIDC provider for one Config.
 type Provider struct {
-	cfg Config
+	cfg  Config
 	impl providerImpl
 }
 

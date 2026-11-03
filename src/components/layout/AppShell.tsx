@@ -1,11 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Menu, X } from "lucide-react";
+import { Menu, ShieldAlert, X } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { api, qk } from "@/api";
+import { JackettGate } from "@/components/layout/JackettGate";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
+import { UserMenu } from "@/components/layout/UserMenu";
 import { Button } from "@/components/ui/button";
+import { authStateQuery } from "@/lib/auth-query";
 import { NAV } from "@/nav";
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
@@ -28,12 +31,36 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-/** Sidebar footer: running Jackett version. */
+/** Sidebar footer: running Jackett and UI versions. */
 function SidebarFooter() {
-  const { data } = useQuery({ queryKey: qk.serverConfig, queryFn: api.serverConfig, staleTime: 60_000 });
+  const { data: auth } = useQuery(authStateQuery);
+  const { data } = useQuery({
+    queryKey: qk.serverConfig,
+    queryFn: api.serverConfig,
+    staleTime: 60_000,
+    enabled: auth?.jackett.ok !== false,
+  });
   return (
-    <div className="mt-auto border-t border-sidebar-border px-5 py-2 text-xs text-muted-foreground">
-      Jackett {data?.app_version ?? ""}
+    <div className="mt-auto space-y-0.5 border-t border-sidebar-border px-5 py-2 text-xs text-muted-foreground">
+      <div>Jackett {data?.app_version ?? auth?.jackett.version ?? ""}</div>
+      {auth?.version && <div>UI {auth.version}</div>}
+    </div>
+  );
+}
+
+/** Red banner when authentication is off. */
+function NoAuthBanner() {
+  const { data } = useQuery(authStateQuery);
+  if (data?.mode !== "none") return null;
+  return (
+    <div role="alert" className="flex items-start gap-2 bg-red-600 px-3 py-2 text-sm font-medium text-white dark:bg-red-700 md:px-5">
+      <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        Вход отключён: любой, кто откроет адрес, управляет Jackett.{" "}
+        <Link to="/settings" hash="auth" className="underline underline-offset-2">
+          Включить вход
+        </Link>
+      </span>
     </div>
   );
 }
@@ -87,6 +114,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
+        <NoAuthBanner />
         <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b bg-background/95 px-3 backdrop-blur md:px-5">
           <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Открыть меню">
             <Menu />
@@ -96,10 +124,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <div className="ml-auto flex items-center gap-1">
             <ThemeToggle />
+            <UserMenu />
           </div>
         </header>
         <main id="main" className="mx-auto w-full max-w-[1600px] flex-1 p-3 md:p-6">
-          {children}
+          <JackettGate>{children}</JackettGate>
         </main>
       </div>
     </div>

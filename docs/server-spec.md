@@ -1,5 +1,16 @@
 # jackett-ui server: specification
 
+> **Amendment 1 (multiple login providers, same model as dnsgate).** Instead of one OIDC provider, the server supports up to three external providers at once, each enabled when its client id is set, each shown as its own button:
+> - `oidc` — generic OpenID Connect with discovery (Authentik, Keycloak, Authelia, Pocket ID…): `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_PROVIDER_NAME`, `OIDC_SCOPES`, `OIDC_ALLOWED_GROUPS`, `OIDC_GROUPS_CLAIM`.
+> - `google` — OIDC with the fixed issuer `https://accounts.google.com`: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+> - `github` — plain OAuth2 (no ID token): `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`; identity from `GET /user` (+ `/user/emails`, primary and verified email, scope `read:user user:email`); state + PKCE like the others.
+>
+> Allow-lists: `AUTH_ALLOWED_EMAILS` (comma separated, any provider, verified emails only) and `GITHUB_USERS` (GitHub logins, case-insensitive). A user is allowed if the email is in `AUTH_ALLOWED_EMAILS`, or the GitHub login is in `GITHUB_USERS`, or (oidc only) a group is in `OIDC_ALLOWED_GROUPS`. **If no allow-list is set at all, external logins are refused** (secure default; otherwise anyone with a Google/GitHub account could log in). `OIDC_ALLOWED_EMAILS` is replaced by `AUTH_ALLOWED_EMAILS`.
+>
+> The mode `oidc` becomes `sso` ("external providers"); the password can stay enabled next to it (`AUTH_PASSWORD_FALLBACK`). Routes become provider-scoped: `/_ui/auth/{provider}/start` and `/_ui/auth/{provider}/callback` with `{provider}` ∈ `oidc|google|github`; the redirect URL per provider is `<public>/_ui/auth/{provider}/callback`. The flow cookie path stays `/_ui/auth/` scoped. Test login: `POST /_ui/api/settings/providers/{provider}/test`. Settings: `auth.providers.{oidc|google|github}` with the same field/locked shape; `auth.allowedEmails`, `auth.githubUsers` at the auth level. `/_ui/api/auth/state` returns `"providers": [{"id":"oidc","name":"Authentik"},{"id":"google","name":"Google"},{"id":"github","name":"GitHub"}]` (only enabled and verified ones) instead of `oidc`.
+>
+> The `internal/auth/oidc` package keeps handling `oidc` and `google` (one `Provider` per config). `github` goes into a new package `internal/auth/github` with the same Start/Finish/Result/Signer shape.
+
 The UI container used to be nginx + static files. It becomes a small Go server (`server/`) that:
 
 1. serves the built UI (embedded with `go:embed`, or `STATIC_DIR` for development),

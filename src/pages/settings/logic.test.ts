@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ServerConfig } from "@/api/types";
-import { passwordError } from "@/pages/settings/AdminPasswordCard";
 import { fromForm, hasErrors, humanSeconds, isDirty, isHttpUrl, proxyChanged, toForm, validate } from "@/pages/settings/logic";
 import { pollUntilUp } from "@/pages/settings/restart";
 
@@ -119,14 +118,6 @@ describe("humanSeconds", () => {
     expect(humanSeconds(45)).toBe("45 с");
     expect(humanSeconds(90000)).toBe("1 д 1 ч");
     expect(humanSeconds(0)).toBe("0 с");
-  });
-});
-
-describe("passwordError", () => {
-  it("flags mismatched passwords", () => {
-    expect(passwordError("a", "b")).toBeTruthy();
-    expect(passwordError("a", "a")).toBeUndefined();
-    expect(passwordError("a", "")).toBeUndefined();
   });
 });
 
