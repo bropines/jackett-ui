@@ -36,6 +36,28 @@ Open http://localhost:8080. Jackett's own UI keeps working on its port.
 | `JACKETT_URL` | `http://jackett:9117` | Jackett base URL as seen from the container |
 | `LISTEN_PORT` | `8080` | Port nginx listens on |
 
+### Kubernetes (Helm): Jackett and the UI in one release
+
+The chart `charts/jackett` runs Jackett (stock linuxserver image) and jackett-ui in one pod, with a volume for `/config`. The Service exposes only the UI, which proxies the Jackett API.
+
+```
+helm install jackett oci://ghcr.io/bropines/charts/jackett --version 0.1.0 \
+  --set persistence.storageClassName=longhorn \
+  --set ingress.enabled=true --set ingress.className=traefik --set ingress.host=jackett.example.com
+```
+
+Jackett settings can be set from values. An init container writes them into `ServerConfig.json` before Jackett starts. Only the keys you set are written, so the rest stays editable in the UI.
+
+| Value | |
+|---|---|
+| `jackett.settings.baseUrlOverride` | Public URL, for correct download/Torznab links behind a proxy |
+| `jackett.settings.proxy.{type,url,port,username,password}` | Proxy to reach blocked trackers (`type`: -1 off, 0 HTTP, 1 SOCKS4, 2 SOCKS5; prefer HTTP) |
+| `jackett.settings.flaresolverrUrl` | FlareSolverr for trackers behind a Cloudflare challenge |
+| `jackett.settings.updateDisabled` | `true` by default: update by bumping the image tag |
+| `jackett.apiKeySecret.name` | Secret with key `apiKey`: a fixed API key that survives reinstalls |
+
+See `charts/jackett/values.yaml` for everything else (images, resources, persistence, ingress).
+
 ### Authentication
 
 - If Jackett has **no admin password**, the UI logs in by itself. Put it behind your own auth (SSO / oauth2-proxy / basic auth) when it is reachable from the internet.

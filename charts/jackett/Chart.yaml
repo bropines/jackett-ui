@@ -1,0 +1,14 @@
+apiVersion: v2
+name: jackett
+description: Jackett with jackett-ui (modern web UI) in one pod. Stock Jackett image, no fork.
+type: application
+version: 0.1.0
+# Jackett version (linuxserver image tag below is derived from values).
+appVersion: "v0.24.2994"
+home: https://github.com/bropines/jackett-ui
+sources:
+  - https://github.com/bropines/jackett-ui
+  - https://github.com/Jackett/Jackett
+keywords: [jackett, torznab, torrent, indexer]
+maintainers:
+  - name: bropines

@@ -1,0 +1,130 @@
+{{- $expr := include "jackett.settingsExpr" . -}}
+{{- $apiKey := .Values.jackett.apiKeySecret.name -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jackett.fullname" . }}
+  labels:
+    {{- include "jackett.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One writer for /config: never run two pods at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "jackett.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "jackett.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/settings: {{ printf "%s|%s" $expr $apiKey | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $expr $apiKey }}
+      initContainers:
+        - name: settings
+          image: "{{ .Values.configInit.image.repository }}:{{ .Values.configInit.image.tag }}"
+          imagePullPolicy: {{ .Values.configInit.image.pullPolicy }}
+          securityContext:
+            runAsUser: {{ .Values.jackett.puid }}
+            runAsGroup: {{ .Values.jackett.pgid }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              f=/config/Jackett/ServerConfig.json
+              mkdir -p /config/Jackett
+              [ -s "$f" ] || echo '{}' > "$f"
+              {{- if $expr }}
+              yq -i -p json -o json {{ $expr | squote }} "$f"
+              {{- end }}
+              {{- if $apiKey }}
+              API_KEY="$(cat /run/apikey/key)" yq -i -p json -o json '.APIKey = strenv(API_KEY)' "$f"
+              {{- end }}
+              echo "ServerConfig.json updated"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            {{- if $apiKey }}
+            - name: apikey
+              mountPath: /run/apikey
+              readOnly: true
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: jackett
+          image: "{{ .Values.jackett.image.repository }}:{{ .Values.jackett.image.tag }}"
+          imagePullPolicy: {{ .Values.jackett.image.pullPolicy }}
+          env:
+            - { name: PUID, value: {{ .Values.jackett.puid | quote }} }
+            - { name: PGID, value: {{ .Values.jackett.pgid | quote }} }
+            - { name: TZ, value: {{ .Values.jackett.tz | quote }} }
+            - { name: AUTO_UPDATE, value: "false" }
+            - { name: DOTNET_gcServer, value: "0" }
+            {{- with .Values.jackett.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: jackett, containerPort: 9117 }
+          readinessProbe:
+            tcpSocket: { port: jackett }
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: jackett }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          resources:
+            {{- toYaml .Values.jackett.resources | nindent 12 }}
+        - name: ui
+          image: {{ include "jackett.uiImage" . }}
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          env:
+            - { name: JACKETT_URL, value: "http://127.0.0.1:9117" }
+            - { name: LISTEN_PORT, value: "8080" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+      volumes:
+        - name: config
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "jackett.fullname" .) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $apiKey }}
+        - name: apikey
+          secret:
+            secretName: {{ $apiKey }}
+            items:
+              - { key: {{ .Values.jackett.apiKeySecret.key }}, path: key }
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

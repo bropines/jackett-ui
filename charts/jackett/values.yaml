@@ -1,0 +1,86 @@
+# Jackett + jackett-ui in one pod.
+# The UI container serves the web UI and proxies the Jackett API (/api, /dl, /bh, /UI)
+# to Jackett over localhost, so the Service exposes only the UI port.
+
+jackett:
+  image:
+    repository: lscr.io/linuxserver/jackett
+    tag: "v0.24.2994-ls24"
+    pullPolicy: IfNotPresent
+  # linuxserver.io env
+  puid: 1000
+  pgid: 1000
+  tz: "Etc/UTC"
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+    limits: { memory: 384Mi }
+  extraEnv: []
+
+  # Settings written into /config/Jackett/ServerConfig.json before Jackett starts.
+  # Only keys that are set (not null) are written; everything else stays as Jackett keeps it,
+  # so the settings page in the UI keeps working. Changing a value here overwrites the UI's value
+  # on the next pod start.
+  settings:
+    # Public URL of the UI (e.g. https://jackett.example.com). Links Jackett returns
+    # (.torrent downloads, Torznab) are built from it. Recommended behind an Ingress.
+    baseUrlOverride: null
+    # Updates come with the image tag; the in-app updater would be lost on restart anyway.
+    updateDisabled: true
+    # Proxy for reaching trackers: type -1 disabled, 0 HTTP, 1 SOCKS4, 2 SOCKS5.
+    # Prefer HTTP (0): Jackett's SOCKS mode goes through a local bridge that some proxies reject.
+    proxy:
+      type: null
+      url: null
+      port: null
+      username: null
+      password: null
+    # FlareSolverr URL for trackers behind a Cloudflare challenge (e.g. http://flaresolverr:8191).
+    flaresolverrUrl: null
+  # Optional: fixed API key from a Secret (key "apiKey"), so clients keep working after a reinstall.
+  apiKeySecret:
+    name: ""
+    key: apiKey
+
+ui:
+  image:
+    repository: ghcr.io/bropines/jackett-ui
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: { cpu: 5m, memory: 16Mi }
+    limits: { memory: 64Mi }
+
+# Init container that writes jackett.settings into ServerConfig.json (needs a shell + yq).
+configInit:
+  image:
+    repository: mikefarah/yq
+    tag: "4.44.3"
+    pullPolicy: IfNotPresent
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls: []
+  #  - secretName: example-tls
+  #    hosts: [jackett.example.com]
+
+podSecurityContext:
+  fsGroup: 1000
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

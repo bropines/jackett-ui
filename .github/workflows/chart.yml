@@ -1,0 +1,35 @@
+name: chart
+
+on:
+  push:
+    branches: [main]
+    paths: ["charts/**", ".github/workflows/chart.yml"]
+  pull_request:
+    paths: ["charts/**", ".github/workflows/chart.yml"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Lint and render
+        run: |
+          helm lint charts/jackett
+          helm template jk charts/jackett > /dev/null
+          helm template jk charts/jackett \
+            --set ingress.enabled=true --set ingress.host=jackett.example.com \
+            --set jackett.settings.proxy.type=0 --set jackett.settings.proxy.url=proxy --set jackett.settings.proxy.port=8080 \
+            --set jackett.apiKeySecret.name=jackett-api > /dev/null
+      - name: Push to ghcr.io/${{ github.repository_owner }}/charts
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/jackett -d /tmp/pkg
+          helm push /tmp/pkg/*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

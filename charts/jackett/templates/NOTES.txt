@@ -1,0 +1,12 @@
+Jackett {{ .Chart.AppVersion }} with jackett-ui is installed.
+
+{{- if .Values.ingress.enabled }}
+Open: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+Open: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "jackett.fullname" . }} 8080:{{ .Values.service.port }}
+      then http://localhost:8080
+{{- end }}
+
+No admin password is set by default: the UI logs in by itself. Keep it behind your own
+access control (internal network, SSO). Search, Torznab and download URLs are protected
+by the Jackett API key (Settings → API key).
