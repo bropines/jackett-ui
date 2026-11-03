@@ -5,3 +5,5 @@ dist
 contract/indexers.json
 .claude/
 server/web/dist
+!examples/.env.example
+server/.data

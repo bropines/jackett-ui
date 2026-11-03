@@ -29,6 +29,10 @@ import (
 var version = "0.2.0"
 
 func main() {
+	// `jackett-ui healthcheck`: for Docker HEALTHCHECK in images without a shell or curl.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck())
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "jackett-ui:", err)
 		os.Exit(1)
@@ -138,6 +142,31 @@ func run() error {
 		_ = hs.Close()
 	}
 	return nil
+}
+
+// healthcheck GETs /healthz on the local listener and returns the exit code.
+func healthcheck() int {
+	listen := os.Getenv("LISTEN")
+	if listen == "" {
+		listen = ":8080"
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	c := &http.Client{Timeout: 3 * time.Second}
+	res, err := c.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+	if err != nil {
+		return 1
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
 }
 
 // authReset removes the stored credentials and providers, resets the mode

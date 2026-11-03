@@ -1,0 +1,21 @@
+# Simplest setup: Jackett + jackett-ui in one container.
+# On first visit the UI asks you to create an admin password. Until then Jackett is not reachable.
+#   docker compose -f aio.yml up -d   →   http://localhost:8080
+services:
+  jackett:
+    image: ghcr.io/bropines/jackett-ui:aio
+    container_name: jackett
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Moscow
+      # Optional: set the password here instead of in the UI (it is then locked in the UI).
+      # AUTH_PASSWORD: change-me-please
+      # Optional: if Jackett links (downloads, Torznab) must use your public URL:
+      # PUBLIC_URL: https://jackett.example.com
+    volumes:
+      - ./config:/config
+    ports:
+      - "8080:8080"
+      # - "9117:9117"   # Jackett's own UI/API, only if you need it
+    restart: unless-stopped

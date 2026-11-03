@@ -28,7 +28,6 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or $expr $apiKey }}
       initContainers:
         - name: settings
           image: "{{ .Values.configInit.image.repository }}:{{ .Values.configInit.image.tag }}"
@@ -39,8 +38,8 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
+              mkdir -p /config/Jackett /config/jackett-ui
               f=/config/Jackett/ServerConfig.json
-              mkdir -p /config/Jackett
               [ -s "$f" ] || echo '{}' > "$f"
               {{- if $expr }}
               yq -i -p json -o json {{ $expr | squote }} "$f"
@@ -57,7 +56,6 @@ spec:
               mountPath: /run/apikey
               readOnly: true
             {{- end }}
-      {{- end }}
       containers:
         - name: jackett
           image: "{{ .Values.jackett.image.repository }}:{{ .Values.jackett.image.tag }}"
@@ -88,9 +86,35 @@ spec:
         - name: ui
           image: {{ include "jackett.uiImage" . }}
           imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          securityContext:
+            runAsUser: {{ .Values.jackett.puid }}
+            runAsGroup: {{ .Values.jackett.pgid }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           env:
+            - { name: LISTEN, value: ":8080" }
             - { name: JACKETT_URL, value: "http://127.0.0.1:9117" }
-            - { name: LISTEN_PORT, value: "8080" }
+            - { name: DATA_DIR, value: "/data" }
+            {{- with .Values.ingress.host }}
+            {{- if $.Values.ingress.enabled }}
+            - { name: PUBLIC_URL, value: {{ printf "http%s://%s" (ternary "s" "" (not (empty $.Values.ingress.tls))) . | quote }} }
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := .Values.ui.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- with .Values.ui.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /data
+              subPath: jackett-ui
           ports:
             - { name: http, containerPort: 8080 }
           readinessProbe:

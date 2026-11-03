@@ -54,7 +54,9 @@ jobs:
           file: Dockerfile.aio
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: JACKETT_IMAGE=lscr.io/linuxserver/jackett:${{ steps.jackett.outputs.version }}
+          build-args: |
+            JACKETT_IMAGE=lscr.io/linuxserver/jackett:${{ steps.jackett.outputs.version }}
+            VERSION=aio-${{ github.sha }}
           tags: |
             ghcr.io/${{ github.repository }}:aio
             ghcr.io/${{ github.repository }}:aio-${{ steps.jackett.outputs.version }}

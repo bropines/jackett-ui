@@ -1,3 +1,8 @@
-#!/usr/bin/with-contenv sh
-# jackett-ui: nginx serving the UI on 8080 and proxying the API to Jackett on 127.0.0.1:9117.
-exec nginx -g 'daemon off;'
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+# jackett-ui: UI + login + Jackett API proxy on :8080, as the same user as Jackett (abc = PUID/PGID).
+if [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    exec s6-setuidgid abc /usr/local/bin/jackett-ui
+else
+    exec /usr/local/bin/jackett-ui
+fi

@@ -5,7 +5,7 @@
 jackett:
   image:
     repository: lscr.io/linuxserver/jackett
-    tag: "v0.24.2994-ls24"
+    tag: "v0.24.3003-ls25"
     pullPolicy: IfNotPresent
   # linuxserver.io env
   puid: 1000
@@ -44,8 +44,19 @@ jackett:
 ui:
   image:
     repository: ghcr.io/bropines/jackett-ui
-    tag: "0.1.0"
+    tag: "0.2.0"
     pullPolicy: IfNotPresent
+  # Plain settings for the UI server (see the README "Configuration" table), e.g.
+  #   AUTH_MODE: sso
+  #   OIDC_ISSUER: https://auth.example.com/application/o/jackett/
+  #   OIDC_PROVIDER_NAME: Authentik
+  #   AUTH_ALLOWED_EMAILS: me@example.com
+  # Anything set here is locked in the UI's settings page. PUBLIC_URL is derived from the ingress.
+  env: {}
+  # Secret with sensitive settings, loaded as environment variables, e.g. keys
+  # OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_SECRET,
+  # AUTH_PASSWORD (or AUTH_PASSWORD_HASH), JACKETT_PASSWORD.
+  existingSecret: ""
   resources:
     requests: { cpu: 5m, memory: 16Mi }
     limits: { memory: 64Mi }

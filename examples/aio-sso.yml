@@ -1,0 +1,31 @@
+# Jackett + jackett-ui with login through your identity provider(s).
+# Put the secrets into .env next to this file (see .env.example) and adjust PUBLIC_URL.
+# Each provider is enabled when its client id is set; you can use one, two or all three.
+# Redirect URLs to register at the provider:
+#   OIDC:   ${PUBLIC_URL}/_ui/auth/oidc/callback
+#   Google: ${PUBLIC_URL}/_ui/auth/google/callback
+#   GitHub: ${PUBLIC_URL}/_ui/auth/github/callback
+services:
+  jackett:
+    image: ghcr.io/bropines/jackett-ui:aio
+    container_name: jackett
+    env_file: .env
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Moscow
+      AUTH_MODE: sso
+      PUBLIC_URL: https://jackett.example.com
+      # Who may log in. Without any of these, external logins are refused.
+      AUTH_ALLOWED_EMAILS: you@example.com
+      # GITHUB_USERS: your-github-login
+      # OIDC_ALLOWED_GROUPS: jackett-users
+      # Keep the password login as a fallback next to SSO (default true).
+      # AUTH_PASSWORD_FALLBACK: "true"
+      # If a reverse proxy in front adds X-Forwarded-* headers, trust it:
+      # TRUSTED_PROXIES: 172.16.0.0/12
+    volumes:
+      - ./config:/config
+    ports:
+      - "127.0.0.1:8080:8080"   # behind your HTTPS reverse proxy
+    restart: unless-stopped

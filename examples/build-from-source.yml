@@ -1,0 +1,19 @@
+# Build the all-in-one image yourself from this repository and the newest Jackett image,
+# instead of pulling ours. Update: docker compose -f build-from-source.yml build --pull && docker compose -f build-from-source.yml up -d
+services:
+  jackett:
+    build:
+      context: https://github.com/bropines/jackett-ui.git#main
+      dockerfile: Dockerfile.aio
+      args:
+        JACKETT_IMAGE: lscr.io/linuxserver/jackett:latest
+    image: jackett-ui:local
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Moscow
+    volumes:
+      - ./config:/config
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

@@ -1,0 +1,24 @@
+# jackett-ui next to a Jackett you already run (any image).
+# Jackett does not need to be published: the UI reaches it over the compose network.
+services:
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Europe/Moscow
+    volumes:
+      - ./jackett-config:/config
+    restart: unless-stopped
+
+  jackett-ui:
+    image: ghcr.io/bropines/jackett-ui:latest
+    environment:
+      JACKETT_URL: http://jackett:9117
+      # JACKETT_PASSWORD: ...   # only if Jackett has an admin password
+    volumes:
+      - ./jackett-ui-data:/data   # UI settings; must be writable by uid 65532 (or set user:)
+    ports:
+      - "8080:8080"
+    depends_on: [jackett]
+    restart: unless-stopped
