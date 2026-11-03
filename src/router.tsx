@@ -15,7 +15,18 @@ export interface RouterContext {
   queryClient: QueryClient;
 }
 
-const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
+const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : typeof v === "number" ? String(v) : undefined);
+
+/** Plain query strings (?q=1080p&t=rutor,kinozal) instead of TanStack's JSON-encoded values. */
+function parseSearch(search: string): Record<string, unknown> {
+  return Object.fromEntries(new URLSearchParams(search));
+}
+function stringifySearch(obj: Record<string, unknown>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj)) if (v !== undefined && v !== null && v !== "") p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: () => (
@@ -53,7 +64,15 @@ const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", 
 const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute]);
 
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
-  return createRouter({ routeTree, context: { queryClient }, history, defaultPreload: "intent", scrollRestoration: true });
+  return createRouter({
+    routeTree,
+    context: { queryClient },
+    history,
+    defaultPreload: "intent",
+    scrollRestoration: true,
+    parseSearch,
+    stringifySearch,
+  });
 }
 
 declare module "@tanstack/react-router" {

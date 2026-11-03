@@ -4,3 +4,4 @@ dist
 .env*
 contract/indexers.json
 contract/logs.json
+.claude/
