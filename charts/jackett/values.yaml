@@ -7,9 +7,6 @@ jackett:
     repository: lscr.io/linuxserver/jackett
     tag: "v0.24.3003-ls25"
     pullPolicy: IfNotPresent
-  # linuxserver.io env
-  puid: 1000
-  pgid: 1000
   tz: "Etc/UTC"
   resources:
     requests: { cpu: 20m, memory: 128Mi }
@@ -88,8 +85,15 @@ ingress:
   #  - secretName: example-tls
   #    hosts: [jackett.example.com]
 
+# Every container runs as this non-root user (default nobody). The linuxserver Jackett
+# image supports it ("non-root mode": it starts without s6 privilege drop).
+runAsUser: 65534
+runAsGroup: 65534
+
 podSecurityContext:
-  fsGroup: 1000
+  fsGroup: 65534
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
 
 nodeSelector: {}
 tolerations: []

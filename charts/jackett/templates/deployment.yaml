@@ -33,8 +33,11 @@ spec:
           image: "{{ .Values.configInit.image.repository }}:{{ .Values.configInit.image.tag }}"
           imagePullPolicy: {{ .Values.configInit.image.pullPolicy }}
           securityContext:
-            runAsUser: {{ .Values.jackett.puid }}
-            runAsGroup: {{ .Values.jackett.pgid }}
+            runAsUser: {{ .Values.runAsUser }}
+            runAsGroup: {{ .Values.runAsGroup }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
           command: ["/bin/sh", "-ec"]
           args:
             - |
@@ -60,9 +63,14 @@ spec:
         - name: jackett
           image: "{{ .Values.jackett.image.repository }}:{{ .Values.jackett.image.tag }}"
           imagePullPolicy: {{ .Values.jackett.image.pullPolicy }}
+          # linuxserver "non-root mode": started directly as this user, no s6 privilege drop.
+          securityContext:
+            runAsUser: {{ .Values.runAsUser }}
+            runAsGroup: {{ .Values.runAsGroup }}
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
           env:
-            - { name: PUID, value: {{ .Values.jackett.puid | quote }} }
-            - { name: PGID, value: {{ .Values.jackett.pgid | quote }} }
             - { name: TZ, value: {{ .Values.jackett.tz | quote }} }
             - { name: AUTO_UPDATE, value: "false" }
             - { name: DOTNET_gcServer, value: "0" }
@@ -87,8 +95,8 @@ spec:
           image: {{ include "jackett.uiImage" . }}
           imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
           securityContext:
-            runAsUser: {{ .Values.jackett.puid }}
-            runAsGroup: {{ .Values.jackett.pgid }}
+            runAsUser: {{ .Values.runAsUser }}
+            runAsGroup: {{ .Values.runAsGroup }}
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
