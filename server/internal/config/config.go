@@ -16,6 +16,7 @@ import (
 
 	"github.com/bropines/jackett-ui/server/internal/auth"
 	"github.com/bropines/jackett-ui/server/internal/netutil"
+	"github.com/bropines/jackett-ui/server/internal/store"
 )
 
 // Defaults.
@@ -48,14 +49,28 @@ type Env struct {
 	PublicURL    *url.URL // nil = unset
 	PublicURLRaw string
 
-	AuthMode string // "" = unset
+	// AuthMode is the deprecated AUTH_MODE ("" = unset), mapped to methods
+	// in Resolve.
+	AuthMode string
+
+	// Methods from AUTH_METHODS (nil = unset).
+	Methods *store.Methods
+	// Disabled from AUTH_DISABLED (nil = unset).
+	Disabled *bool
+	// AutoProvision (AUTH_AUTO_PROVISION), DefaultRole (AUTH_DEFAULT_ROLE),
+	// AdminEmails (AUTH_ADMIN_EMAILS); nil = unset.
+	AutoProvision *bool
+	DefaultRole   *string
+	AdminEmails   *[]string
 
 	// PasswordHash is the bcrypt hash from AUTH_PASSWORD (hashed at parse
-	// time, the plain password is not kept) or AUTH_PASSWORD_HASH.
+	// time, the plain password is not kept) or AUTH_PASSWORD_HASH. It is the
+	// password of the user "admin".
 	PasswordHash string
 	// PasswordVar is the variable that set it ("" = unset).
 	PasswordVar string
 
+	// PasswordFallback (AUTH_PASSWORD_FALLBACK): only with AUTH_MODE=sso.
 	PasswordFallback *bool
 
 	// Providers holds the env values of the external login providers, keyed
@@ -160,6 +175,46 @@ func ParseEnv(lookup Lookup) (*Env, error) {
 		}
 		e.AuthMode = v
 	}
+	if v, ok := get("AUTH_METHODS"); ok {
+		var m store.Methods
+		for _, id := range SplitList(strings.ToLower(v)) {
+			p := m.Ptr(id)
+			if p == nil {
+				fail("AUTH_METHODS: %q is not one of password, oidc, google, github, header", id)
+				continue
+			}
+			*p = true
+		}
+		e.Methods = &m
+		if e.AuthMode != "" {
+			fail("AUTH_MODE (deprecated) and AUTH_METHODS are both set; use AUTH_METHODS")
+		}
+	}
+	boolVar := func(name string) *bool {
+		v, ok := get(name)
+		if !ok {
+			return nil
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			fail("%s: %q is not a boolean", name, v)
+			return nil
+		}
+		return &b
+	}
+	e.Disabled = boolVar("AUTH_DISABLED")
+	if e.Disabled != nil && e.AuthMode != "" {
+		fail("AUTH_MODE (deprecated) and AUTH_DISABLED are both set; use AUTH_DISABLED")
+	}
+	e.AutoProvision = boolVar("AUTH_AUTO_PROVISION")
+	if v, ok := get("AUTH_DEFAULT_ROLE"); ok {
+		v = strings.ToLower(v)
+		if !ValidRole(v) {
+			fail("AUTH_DEFAULT_ROLE: %q is not one of viewer, editor, admin", v)
+		}
+		e.DefaultRole = &v
+	}
+	e.AdminEmails = list("AUTH_ADMIN_EMAILS")
 
 	pw, hasPW := lookup("AUTH_PASSWORD")
 	hasPW = hasPW && pw != ""
@@ -245,8 +300,8 @@ func ParseEnv(lookup Lookup) (*Env, error) {
 		}
 		e.HeaderTrusted = &l
 	}
-	if e.AuthMode == auth.ModeHeader && e.HeaderTrusted == nil {
-		fail("AUTH_MODE=header requires AUTH_HEADER_TRUSTED (the CIDRs of the reverse proxy that sets %s)", deref(e.HeaderName, DefaultHeaderName))
+	if (e.AuthMode == auth.ModeHeader || (e.Methods != nil && e.Methods.Header)) && e.HeaderTrusted == nil {
+		fail("the header login method requires AUTH_HEADER_TRUSTED (the CIDRs of the reverse proxy that sets %s)", deref(e.HeaderName, DefaultHeaderName))
 	}
 
 	if v, ok := get("SESSION_TTL"); ok {

@@ -2,7 +2,7 @@ import { AlertTriangle, Check, Copy, Inbox, Info, RotateCw } from "lucide-react"
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { errText } from "@/api";
+import { errText, isForbidden } from "@/api";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -73,9 +73,11 @@ export function ErrorState({ error, onRetry, className }: { error: unknown; onRe
       <div className="rounded-full bg-destructive/10 p-3">
         <AlertTriangle className="h-5 w-5 text-destructive" />
       </div>
-      <p className="font-medium">Не удалось загрузить данные</p>
-      <p className="max-w-sm text-sm text-muted-foreground">{errText(error)}</p>
-      {onRetry && (
+      <p className="font-medium">{isForbidden(error) ? "Недостаточно прав" : "Не удалось загрузить данные"}</p>
+      <p className="max-w-sm text-sm text-muted-foreground">
+        {isForbidden(error) ? "Это действие доступно другой роли. Если оно нужно, попросите администратора." : errText(error)}
+      </p>
+      {onRetry && !isForbidden(error) && (
         <Button variant="outline" size="sm" className="mt-2" onClick={onRetry}>
           <RotateCw />
           Повторить

@@ -20,7 +20,7 @@ const key = jackettfake.APIKey
 func TestSetupGating(t *testing.T) {
 	h := newHarness(t, harnessOpt{})
 	st := h.state()
-	if !st.SetupRequired || st.Authenticated || st.Mode != "password" || st.PasswordLogin {
+	if !st.SetupRequired || st.Authenticated || st.Disabled || !st.Methods.Password || st.User != nil {
 		t.Fatalf("fresh state: %+v", st)
 	}
 	if st.Jackett.Version != "" {
@@ -68,7 +68,7 @@ func TestSetupGating(t *testing.T) {
 		t.Fatal("setup did not log in")
 	}
 	st = h.state()
-	if st.SetupRequired || !st.Authenticated || st.User != "admin" || !st.PasswordLogin {
+	if st.SetupRequired || !st.Authenticated || st.User == nil || st.User.Username != "admin" || st.User.Role != "admin" || !st.Methods.Password {
 		t.Fatalf("after setup: %+v", st)
 	}
 	if !st.Jackett.OK || st.Jackett.Version == "" {
@@ -112,17 +112,25 @@ func TestRoutingMatrix(t *testing.T) {
 		{"GET", "/_ui/auth/unknown/start", 404, 404},
 		{"GET", "/api/v2.0/indexers", 401, 200},
 		{"GET", "/API/v2.0/indexers", 401, 200},
-		{"GET", "/api/v2.0/server/config?apikey=" + key, 401, 200}, // the key doesn't open non-search routes
-		{"GET", "/api/v2.0/indexers/all/results/../../../server/config?apikey=" + key, 401, 200},
-		{"GET", "/api/v2.0/indexers/x/resultsX?apikey=" + key, 401, 200},
-		{"GET", "/api/v2.0/indexers/all/results?apikey=" + key + "&Query=x", 200, 200},
-		{"GET", "/api/v2.0/indexers/rutor/results/torznab/api?apikey=" + key + "&t=caps", 200, 200},
-		{"GET", "/api/v2.0/indexers/rutor/results/potato/?apikey=" + key, 200, 200},
-		{"GET", "/dl/rutor/?jackett_apikey=" + key + "&path=x", 200, 200},
-		{"GET", "/bh/rutor/?jackett_apikey=" + key, 200, 200},
-		{"GET", "/api/v2.0/indexers/all/results?Query=x", 401, 401}, // no key: ours (anon) / Jackett's (authed, no cookie sent)
-		{"GET", "/api/v2.0/indexers/all/results?apikey=", 401, 401},
-		{"GET", "/dl/rutor/?path=x", 401, 401},
+		// Jackett's own key is refused for everybody (spec §4).
+		{"GET", "/api/v2.0/server/config?apikey=" + key, 401, 401},
+		{"GET", "/api/v2.0/indexers/all/results/../../../server/config?apikey=" + key, 401, 401},
+		{"GET", "/api/v2.0/indexers/x/resultsX?apikey=" + key, 401, 401},
+		{"GET", "/api/v2.0/indexers/all/results?apikey=" + key + "&Query=x", 401, 401},
+		{"GET", "/api/v2.0/indexers/rutor/results/torznab/api?apikey=" + key + "&t=caps", 401, 401},
+		{"GET", "/dl/rutor/?jackett_apikey=" + key + "&path=x", 401, 401},
+		{"GET", "/bh/rutor/?jackett_apikey=" + key, 401, 401},
+		{"GET", "/api/v2.0/indexers?X-Api-Key=x", 401, 200}, // not a key parameter
+		// The session: no key needed, the server injects Jackett's key.
+		{"GET", "/api/v2.0/indexers/all/results?Query=x", 401, 200},
+		{"GET", "/api/v2.0/indexers/all/results?apikey=", 401, 200},
+		{"GET", "/api/v2.0/indexers/all/results?apikey=session&Query=x", 401, 200},
+		{"GET", "/api/v2.0/indexers/rutor/results/potato/?apikey=session", 401, 200},
+		{"GET", "/dl/rutor/?jackett_apikey=session&path=x", 401, 200},
+		{"GET", "/dl/rutor/?path=x", 401, 200},
+		{"GET", "/bh/rutor/", 401, 200},
+		{"GET", "/api/v2.0/indexers/all/results?apikey=garbage", 401, 401},
+		{"GET", "/api/v2.0/indexers/all/results?apikey=session&jackett_apikey=other", 401, 401},
 		{"GET", "/UI/Dashboard", 404, 404},
 		{"POST", "/UI/Dashboard", 404, 404},
 		{"GET", "/ui/dashboard", 404, 404},
@@ -184,6 +192,7 @@ func TestUILogoutClearsSession(t *testing.T) {
 func TestCSRF(t *testing.T) {
 	h := newHarness(t, harnessOpt{})
 	h.setup()
+	tok := h.newToken("csrf")
 	cases := []struct {
 		name   string
 		method string
@@ -208,7 +217,9 @@ func TestCSRF(t *testing.T) {
 		{"logout-all cross origin", "POST", "/_ui/api/auth/logout-all", nil, []reqOpt{xhr, hdr("Origin", "http://evil")}, 403},
 		{"login form post", "POST", "/_ui/api/auth/login", "password=x", []reqOpt{hdr("Content-Type", "application/x-www-form-urlencoded")}, 403},
 		{"get is exempt", "GET", "/api/v2.0/indexers", nil, nil, 200},
-		{"api-key route exempt (no ambient credentials)", "POST", "/api/v2.0/indexers/all/results?apikey=" + key, "", nil, 200},
+		{"token request exempt (no ambient credentials)", "POST", "/api/v2.0/indexers/all/results?apikey=" + tok.Token, "", nil, 200},
+		{"token without CSRF header but with session cookie still exempt", "DELETE", "/dl/x/", nil, []reqOpt{hdr("X-Api-Key", tok.Token)}, 200},
+		{"session placeholder is not exempt", "POST", "/api/v2.0/indexers/x/test?apikey=session", "", nil, 403},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -225,6 +236,7 @@ func TestCSRF(t *testing.T) {
 
 func TestLoginRateLimitLogout(t *testing.T) {
 	h := newHarness(t, harnessOpt{})
+	h.srv.limiter.PerMinute, h.srv.limiter.Burst = 5, 5
 	h.setup()
 	anon := h.clone()
 	if w := anon.login("wrong-password"); w.Code != 401 || errorCode(w) != "invalid_credentials" {
@@ -238,7 +250,7 @@ func TestLoginRateLimitLogout(t *testing.T) {
 		t.Fatal("no session cookie")
 	}
 	st := anon.state()
-	if !st.Authenticated || st.User != "admin" {
+	if !st.Authenticated || st.User == nil || st.User.Username != "admin" {
 		t.Fatalf("%+v", st)
 	}
 
@@ -272,9 +284,9 @@ func TestLoginRateLimitLogout(t *testing.T) {
 		t.Fatal("still authenticated after logout")
 	}
 	// Logout-all bumps the epoch: other sessions die.
-	epoch := h.store.Get().AuthEpoch
+	epoch := h.userByName("admin").Epoch
 	other.expect(other.do("POST", "/_ui/api/auth/logout-all", nil, xhr), 204)
-	if h.store.Get().AuthEpoch != epoch+1 {
+	if h.userByName("admin").Epoch != epoch+1 {
 		t.Fatal("epoch not bumped")
 	}
 	h.expect(h.do("GET", "/api/v2.0/indexers", nil), 401)
@@ -418,32 +430,73 @@ func TestSecurityHeadersStaticAndGzip(t *testing.T) {
 }
 
 func TestHeaderMode(t *testing.T) {
+	// Deprecated AUTH_MODE=header → methods {header}.
 	h := newHarness(t, harnessOpt{env: map[string]string{"AUTH_MODE": "header", "AUTH_HEADER_TRUSTED": "10.0.0.0/8"}})
 	proxyClient := h.clone()
 	proxyClient.remote = "10.0.0.5:1"
 	st := h.state()
-	if st.SetupRequired || st.Authenticated || st.PasswordLogin {
+	if st.SetupRequired || st.Authenticated || st.Methods.Password || !st.Methods.Header {
 		t.Fatalf("%+v", st)
 	}
 	h.expect(h.do("GET", "/api/v2.0/indexers", nil, hdr("Remote-User", "alice")), 401) // untrusted peer
 	proxyClient.expect(proxyClient.do("GET", "/api/v2.0/indexers", nil), 401)          // trusted, no header
+	// First header login while there are no users: becomes admin (bootstrap).
 	proxyClient.expect(proxyClient.do("GET", "/api/v2.0/indexers", nil, hdr("Remote-User", "alice")), 200)
 	w := proxyClient.do("GET", "/_ui/api/auth/state", nil, hdr("Remote-User", "alice"))
-	if s := decode[stateResponse](t, w); !s.Authenticated || s.User != "alice" || s.Mode != "header" {
+	if s := decode[stateResponse](t, w); !s.Authenticated || s.User == nil || s.User.Username != "alice" || s.User.Role != "admin" || s.SetupRequired {
 		t.Fatalf("%+v", s)
 	}
 	if w := h.login("whatever-pass"); w.Code != 403 || errorCode(w) != "password_login_disabled" {
 		t.Fatalf("password login in header mode: %d", w.Code)
 	}
+	// Next unknown user: auto-provisioned with the default role (viewer);
+	// an e-mail is not a valid user name → derived name + header identity.
+	proxyClient.expect(proxyClient.do("GET", "/api/v2.0/indexers", nil, hdr("Remote-User", "Bob@Example.com")), 200)
+	bob := h.userByName("bob")
+	if bob.Role != "viewer" || len(bob.Identities) != 1 || bob.Identities[0].Provider != "header" || bob.Identities[0].Subject != "bob@example.com" {
+		t.Fatalf("bob: %+v", bob)
+	}
+	// Same person again (case differs): same account, no duplicate.
+	proxyClient.expect(proxyClient.do("GET", "/api/v2.0/indexers", nil, hdr("Remote-User", "BOB@example.com")), 200)
+	if n := len(h.store.Get().Users); n != 2 {
+		t.Fatalf("users = %d", n)
+	}
+	// Viewer: no server config.
+	proxyClient.expect(proxyClient.do("GET", "/api/v2.0/server/config", nil, hdr("Remote-User", "bob@example.com")), 403)
+	// Disabled user → 401; auto-provisioning off → 401.
+	alice := proxyClient.clone()
+	hh := func(v string) reqOpt { return hdr("Remote-User", v) }
+	alice.expect(alice.do("PATCH", "/_ui/api/users/"+bob.ID, map[string]any{"disabled": true}, hh("alice")), 200)
+	if w := proxyClient.do("GET", "/api/v2.0/indexers", nil, hh("bob@example.com")); w.Code != 401 || errorCode(w) != "user_disabled" {
+		t.Fatalf("disabled: %d %s", w.Code, w.Body)
+	}
+	alice.expect(alice.put(map[string]any{"auth": map[string]any{"autoProvision": map[string]any{"enabled": false}}}, hh("alice")), 200)
+	if w := proxyClient.do("GET", "/api/v2.0/indexers", nil, hh("carol")); w.Code != 401 || errorCode(w) != "user_not_allowed" {
+		t.Fatalf("no auto-provision: %d %s", w.Code, w.Body)
+	}
+	// Methods are locked by AUTH_MODE.
+	if w := alice.put(map[string]any{"auth": map[string]any{"methods": map[string]any{"password": true, "header": true}}}, hh("alice")); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("locked methods: %d %s", w.Code, w.Body)
+	}
 }
 
 func TestNoneMode(t *testing.T) {
-	h := newHarness(t, harnessOpt{env: map[string]string{"AUTH_MODE": "none"}})
+	h := newHarness(t, harnessOpt{env: map[string]string{"AUTH_DISABLED": "true"}})
 	st := h.state()
-	if !st.Authenticated || st.SetupRequired || st.Mode != "none" {
+	if !st.Authenticated || st.SetupRequired || !st.Disabled || st.User != nil {
 		t.Fatalf("%+v", st)
 	}
 	h.expect(h.do("GET", "/api/v2.0/indexers", nil), 200)
+	h.expect(h.do("GET", "/api/v2.0/server/config", nil), 200) // anonymous admin
+	h.expect(h.do("GET", "/_ui/api/settings", nil), 200)
+	if w := h.do("GET", "/_ui/api/me", nil); w.Code != 409 || errorCode(w) != "no_user" {
+		t.Fatalf("me: %d", w.Code)
+	}
+	// Deprecated alias.
+	h2 := newHarness(t, harnessOpt{env: map[string]string{"AUTH_MODE": "none"}})
+	if st := h2.state(); !st.Disabled || !st.Authenticated {
+		t.Fatalf("%+v", st)
+	}
 }
 
 func TestSlidingRenewal(t *testing.T) {

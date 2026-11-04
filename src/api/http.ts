@@ -30,6 +30,11 @@ export class ApiError extends Error {
   }
 }
 
+/** True for "your role may not do this" (403). */
+export function isForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403;
+}
+
 /** Human-readable error text for toasts and error states. */
 export function errText(err: unknown): string {
   if (err instanceof ApiError) return err.message || `HTTP ${err.status}`;
@@ -39,9 +44,22 @@ export function errText(err: unknown): string {
 
 /** Russian fallbacks for server error codes that come without a message. */
 const CODE_TEXT: Record<string, string> = {
-  setup_required: "Нужно задать пароль администратора",
+  setup_required: "Нужно создать администратора",
   unauthorized: "Сессия истекла, войдите снова",
-  invalid_credentials: "Неверный пароль",
+  forbidden: "Недостаточно прав",
+  invalid_credentials: "Неверное имя пользователя или пароль",
+  invalid_token: "Недействительный API-токен",
+  identity_in_use: "Этот аккаунт уже привязан к другому пользователю",
+  last_admin: "Нельзя убрать последнего администратора",
+  would_lock_out: "После этого войти будет невозможно: оставьте хотя бы один способ входа",
+  username_taken: "Такое имя пользователя уже занято",
+  invalid_username: "Имя пользователя: 2–32 символа, латиница, цифры, точка, дефис, подчёркивание",
+  user_not_found: "Пользователь не найден",
+  invite_not_found: "Приглашение не найдено",
+  invite_expired: "Срок приглашения истёк",
+  invite_used: "Приглашение уже использовано",
+  too_many_tokens: "Слишком много токенов: удалите ненужные",
+  user_disabled: "Пользователь отключён",
   rate_limited: "Слишком много попыток",
   locked: "Настройка задана переменной окружения",
   jackett_unreachable: "Jackett недоступен",
@@ -71,6 +89,8 @@ export async function errorFromResponse(res: Response): Promise<ApiError> {
   const code = isServer ? body?.error : undefined;
   let message = isServer ? body?.message || codeText(code) || code : body?.error;
   message ||= text.slice(0, 300) || `HTTP ${res.status}`;
+
+  if (res.status === 403 && !body?.message) message = "Недостаточно прав";
 
   const err = new ApiError(res.status, message, body, code);
   const field = isServer ? (body?.field ?? body?.path) : undefined;

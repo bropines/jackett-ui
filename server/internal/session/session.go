@@ -1,7 +1,7 @@
 // Package session implements the jui_session cookie: an HMAC-SHA256 signed
-// JSON payload {u, m, e, x}. Sessions are rejected when the signature is
-// wrong, the expiry passed, or the auth epoch / mode differ from the current
-// ones (epoch-based invalidation: logout-all, password change, mode change).
+// JSON payload {v, u, m, e, g, x}. Decode rejects a bad signature, another
+// format or an expired session; the HTTP layer then checks the user, the
+// user epoch, the global auth epoch and that the login method is still on.
 package session
 
 import (
@@ -69,13 +69,20 @@ func (s *Signer) Verify(token string) ([]byte, bool) {
 	return payload, true
 }
 
-// Session is the cookie payload.
+// Session is the cookie payload (format 2): the user id, the method the
+// session was established with, the user's epoch and the global auth epoch.
 type Session struct {
-	User   string `json:"u"`
-	Mode   string `json:"m"`
-	Epoch  uint64 `json:"e"`
+	V      int    `json:"v"`
+	UID    string `json:"u"`
+	Method string `json:"m"`
+	Epoch  uint64 `json:"e"` // user epoch
+	Global uint64 `json:"g"` // global auth epoch
 	Expiry int64  `json:"x"` // unix seconds
 }
+
+// payloadVersion marks the v0.3 payload; v0.2 cookies ({u: name, m: mode})
+// never decode.
+const payloadVersion = 2
 
 // Manager issues and checks session cookies.
 type Manager struct {
@@ -101,8 +108,9 @@ func (m *Manager) Encode(s Session) string {
 	return m.Signer.Sign(b)
 }
 
-// Decode verifies a cookie value and checks expiry, epoch and mode.
-func (m *Manager) Decode(token, mode string, epoch uint64) (Session, bool) {
+// Decode verifies a cookie value (signature, format, expiry). The caller
+// checks the epochs, the user and the method against the current state.
+func (m *Manager) Decode(token string) (Session, bool) {
 	payload, ok := m.Signer.Verify(token)
 	if !ok {
 		return Session{}, false
@@ -111,15 +119,15 @@ func (m *Manager) Decode(token, mode string, epoch uint64) (Session, bool) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		return Session{}, false
 	}
-	if s.User == "" || s.Mode != mode || s.Epoch != epoch || m.now().Unix() >= s.Expiry {
+	if s.V != payloadVersion || s.UID == "" || s.Method == "" || m.now().Unix() >= s.Expiry {
 		return Session{}, false
 	}
 	return s, true
 }
 
 // New creates a session valid for ttl.
-func (m *Manager) New(user, mode string, epoch uint64, ttl time.Duration) Session {
-	return Session{User: user, Mode: mode, Epoch: epoch, Expiry: m.now().Add(ttl).Unix()}
+func (m *Manager) New(uid, method string, userEpoch, global uint64, ttl time.Duration) Session {
+	return Session{V: payloadVersion, UID: uid, Method: method, Epoch: userEpoch, Global: global, Expiry: m.now().Add(ttl).Unix()}
 }
 
 // NeedsRenewal reports whether more than half of ttl has passed.

@@ -1,37 +1,16 @@
-import { Github, KeyRound, Loader2, LogIn } from "lucide-react";
+import { KeyRound, Loader2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 
-import { ApiError, errText, providerStartUrl, serverApi, type AuthState, type ProviderId } from "@/api";
+import { ApiError, errText, providerStartUrl, serverApi, type AuthState } from "@/api";
 import { rateLimitText } from "@/api/http";
+import { ProviderIcon } from "@/components/auth/ProviderIcon";
 import { Callout, Field } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { authErrorText } from "@/lib/auth";
+import { currentReturnPath, useAuthErrorParam } from "@/lib/auth-hooks";
 import { AuthLayout } from "@/pages/auth/AuthLayout";
 import { SecretInput } from "@/pages/settings/parts";
-
-/** Reads `?authError=` (set by the OIDC callback) and removes it from the address bar. */
-function useAuthErrorParam(): string | null {
-  const [code] = useState(() => new URLSearchParams(window.location.search).get("authError"));
-  useEffect(() => {
-    if (!code) return;
-    const url = new URL(window.location.href);
-    url.searchParams.delete("authError");
-    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
-  }, [code]);
-  return code;
-}
-
-/** Where to come back after the IdP: the current page without `authError`. */
-export function currentReturnPath(): string {
-  const url = new URL(window.location.href);
-  url.searchParams.delete("authError");
-  return `${url.pathname}${url.search}`;
-}
-
-/** Brand-neutral icons: lucide's GitHub mark, a generic one for the rest. */
-function ProviderIcon({ id }: { id: ProviderId }) {
-  return id === "github" ? <Github /> : <LogIn />;
-}
 
 /** Seconds left until `until` (ms timestamp), ticking every second. */
 function useCountdown(until: number | null): number {
@@ -47,6 +26,7 @@ function useCountdown(until: number | null): number {
 
 export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => void }) {
   const authError = useAuthErrorParam();
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -54,8 +34,10 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
   const wait = useCountdown(blockedUntil);
   const blocked = wait > 0;
 
-  const providers = state.providers ?? [];
+  const methods = state.methods ?? { password: false, providers: [], header: false };
+  const providers = methods.providers ?? [];
   const external = providers.length > 0;
+  const passwordLogin = methods.password;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -63,7 +45,7 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
     setBusy(true);
     setError("");
     try {
-      await serverApi.login(password);
+      await serverApi.login({ username: username.trim() || "admin", password });
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
@@ -71,7 +53,7 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
         setBlockedUntil(Date.now() + secs * 1000);
         setError("");
       } else if (err instanceof ApiError && err.status === 401) {
-        setError("Неверный пароль");
+        setError("Неверное имя пользователя или пароль");
       } else {
         setError(errText(err));
       }
@@ -91,7 +73,7 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
       {external && (
         <div className="space-y-2">
           {providers.map((p) => (
-            <Button key={p.id} asChild className="w-full" variant={state.passwordLogin || providers.length > 1 ? "outline" : "default"}>
+            <Button key={p.id} asChild className="w-full" variant={passwordLogin || providers.length > 1 ? "outline" : "default"}>
               <a href={providerStartUrl(p.id, currentReturnPath())}>
                 <ProviderIcon id={p.id} /> Войти через {p.name}
               </a>
@@ -100,15 +82,26 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
         </div>
       )}
 
-      {external && state.passwordLogin && (
+      {external && passwordLogin && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground" aria-hidden>
           <span className="h-px flex-1 bg-border" /> или <span className="h-px flex-1 bg-border" />
         </div>
       )}
 
-      {state.passwordLogin && (
+      {passwordLogin && (
         <form onSubmit={submit} className="space-y-3">
-          <input type="text" name="username" autoComplete="username" value="admin" readOnly hidden />
+          <Field label="Имя пользователя" htmlFor="login-user">
+            <Input
+              id="login-user"
+              name="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="admin"
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+          </Field>
           <Field label="Пароль" htmlFor="login-pw">
             <SecretInput id="login-pw" value={password} onChange={setPassword} autoComplete="current-password" invalid={!!error} />
           </Field>
@@ -128,11 +121,11 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
         </form>
       )}
 
-      {!external && !state.passwordLogin && (
+      {!external && !passwordLogin && (
         <Callout variant="warning" title="Вход недоступен">
-          {state.mode === "header"
-            ? "Интерфейс ожидает, что вход выполнит прокси-сервер авторизации перед ним, но запрос пришёл без нужного заголовка. Откройте адрес через этот прокси."
-            : "Ни пароль, ни внешний вход не настроены. Задайте AUTH_PASSWORD или настройки провайдера (OIDC, Google, GitHub) в переменных окружения сервера."}
+          {methods.header
+            ? "Интерфейс ожидает, что вход выполнит прокси-сервер авторизации перед ним, но запрос пришёл без нужного заголовка или такого пользователя нет. Откройте адрес через этот прокси."
+            : "Ни один способ входа не включён. Задайте AUTH_METHODS и настройки провайдера (OIDC, Google, GitHub) или AUTH_PASSWORD в переменных окружения сервера."}
         </Callout>
       )}
     </AuthLayout>

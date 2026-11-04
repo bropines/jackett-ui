@@ -262,11 +262,24 @@ func FlowTestToken(r *http.Request, s Signer) string {
 	return st.TestToken
 }
 
+// FlowInfo returns the test token (an opaque intent for the HTTP layer) and
+// the sanitized return path of the flow carried by r; ok=false if there is
+// no valid, unexpired flow cookie. Works for flows started by the github
+// package too (same cookie shape). It does not consume the flow.
+func FlowInfo(r *http.Request, s Signer) (testToken, returnPath string, ok bool) {
+	st, err := readFlow(r, s)
+	if err != nil {
+		return "", "", false
+	}
+	return st.TestToken, SanitizeReturnPath(st.Return), true
+}
+
 // idClaims are the ID token claims we use besides the standard ones.
 type idClaims struct {
 	Email             string `json:"email"`
 	EmailVerified     any    `json:"email_verified"`
 	PreferredUsername string `json:"preferred_username"`
+	Name              string `json:"name"`
 }
 
 func (p *provider) finish(w http.ResponseWriter, r *http.Request, s Signer, secure bool) (Result, error) {
@@ -342,7 +355,14 @@ func (p *provider) finish(w http.ResponseWriter, r *http.Request, s Signer, secu
 	}
 
 	verified, present := boolClaim(c.EmailVerified)
-	emailUsable := id.Email != "" && (!present || verified || p.cfg.AllowUnverifiedEmail)
+	id.Issuer, id.Subject = idt.Issuer, idt.Subject
+	id.EmailVerified, id.EmailVerifiedPresent = verified, present
+	id.Name = strings.TrimSpace(c.Name)
+	id.PreferredUsername = strings.TrimSpace(c.PreferredUsername)
+	if id.Subject == "" {
+		return Result{}, fmt.Errorf("oidc: id token has no subject: %w", ErrToken)
+	}
+	emailUsable := id.EmailUsable(p.cfg.AllowUnverifiedEmail)
 	if err := p.checkAllowed(id, emailUsable); err != nil {
 		return Result{}, err
 	}

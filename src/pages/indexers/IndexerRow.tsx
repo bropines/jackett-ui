@@ -1,4 +1,4 @@
-import { CheckCircle2, ExternalLink, KeyRound, Link2, Loader2, MoreVertical, Pencil, Play, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, ExternalLink, Link2, Loader2, MoreVertical, Pencil, Play, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -28,14 +28,15 @@ async function copyWithToast(text: string, what: string) {
 export function IndexerRow({
   ix,
   test,
-  apiKey,
+  canManage,
   onTest,
   onEdit,
   onDelete,
 }: {
   ix: IndexerSummary;
   test: TestState | undefined;
-  apiKey: string;
+  /** Editors and admins: test / configure / delete. Viewers see the list read-only. */
+  canManage: boolean;
   onTest: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -61,14 +62,20 @@ export function IndexerRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            className="min-w-0 truncate text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={onEdit}
-            title={ix.description || ix.name}
-          >
-            {ix.name}
-          </button>
+          {canManage ? (
+            <button
+              type="button"
+              className="min-w-0 truncate text-left font-medium hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={onEdit}
+              title={ix.description || ix.name}
+            >
+              {ix.name}
+            </button>
+          ) : (
+            <span className="min-w-0 truncate font-medium" title={ix.description || ix.name}>
+              {ix.name}
+            </span>
+          )}
           <LangBadge code={ix.language} />
           <TypeBadge type={ix.type} />
           {ix.tags.map((t) => (
@@ -125,14 +132,18 @@ export function IndexerRow({
       </div>
 
       <div className="flex shrink-0 items-start gap-1">
-        <Button variant="outline" size="sm" className="hidden sm:inline-flex" disabled={running} onClick={onTest}>
-          {running ? <Loader2 className="animate-spin" /> : <Play />}
-          Проверить
-        </Button>
-        <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onEdit}>
-          <Pencil />
-          Настроить
-        </Button>
+        {canManage && (
+          <>
+            <Button variant="outline" size="sm" className="hidden sm:inline-flex" disabled={running} onClick={onTest}>
+              {running ? <Loader2 className="animate-spin" /> : <Play />}
+              Проверить
+            </Button>
+            <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onEdit}>
+              <Pencil />
+              Настроить
+            </Button>
+          </>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Действия: ${ix.name}`}>
@@ -140,21 +151,21 @@ export function IndexerRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
-            <DropdownMenuItem className="sm:hidden" disabled={running} onSelect={onTest}>
-              <Play />
-              Проверить
-            </DropdownMenuItem>
-            <DropdownMenuItem className="sm:hidden" onSelect={onEdit}>
-              <Pencil />
-              Настроить
-            </DropdownMenuItem>
+            {canManage && (
+              <>
+                <DropdownMenuItem className="sm:hidden" disabled={running} onSelect={onTest}>
+                  <Play />
+                  Проверить
+                </DropdownMenuItem>
+                <DropdownMenuItem className="sm:hidden" onSelect={onEdit}>
+                  <Pencil />
+                  Настроить
+                </DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuItem onSelect={() => void copyWithToast(torznabUrl(ix.id), "Torznab-адрес")}>
               <Link2 />
               Копировать Torznab-адрес
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void copyWithToast(apiKey, "API-ключ")}>
-              <KeyRound />
-              Копировать API-ключ
             </DropdownMenuItem>
             {ix.site_link && (
               <DropdownMenuItem asChild>
@@ -164,11 +175,15 @@ export function IndexerRow({
                 </a>
               </DropdownMenuItem>
             )}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}>
-              <Trash2 />
-              Удалить
-            </DropdownMenuItem>
+            {canManage && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}>
+                  <Trash2 />
+                  Удалить
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

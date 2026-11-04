@@ -1,6 +1,8 @@
 package proxy_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -211,5 +214,98 @@ func TestJackettBasePath(t *testing.T) {
 	do(px, "GET", "/api/v2.0/indexers", "", proxy.Options{}, nil)
 	if seen != "/jackett/api/v2.0/indexers" {
 		t.Fatalf("upstream path %q", seen)
+	}
+}
+
+// upstream returns a proxy to a custom handler (no Jackett login: WithCookie false).
+func upstream(t *testing.T, h http.HandlerFunc) *proxy.Proxy {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	u, _ := url.Parse(srv.URL)
+	return proxy.New(jackett.New(u, "", nil, quiet), nil, quiet)
+}
+
+const realKey = "realjackettkey0123456789abcdef00"
+
+func gz(s string) []byte {
+	var b bytes.Buffer
+	zw := gzip.NewWriter(&b)
+	_, _ = zw.Write([]byte(s))
+	_ = zw.Close()
+	return b.Bytes()
+}
+
+func TestRewriteScrubsKey(t *testing.T) {
+	var seen http.Header
+	var seenQuery string
+	px := upstream(t, func(w http.ResponseWriter, r *http.Request) {
+		seen, seenQuery = r.Header.Clone(), r.URL.RawQuery
+		w.Header().Set("X-Link", "http://j/dl/x/?jackett_apikey="+realKey)
+		switch r.URL.Path {
+		case "/gzip":
+			w.Header().Set("Content-Type", "application/rss+xml")
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write(gz(`<rss><link>http://j/dl/x/?jackett_apikey=` + realKey + `&amp;path=1</link></rss>`))
+		case "/config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"api_key":"`+realKey+`","port":9117,"note":"`+realKey+`"}`)
+		case "/torrent":
+			w.Header().Set("Content-Type", "application/x-bittorrent")
+			_, _ = io.WriteString(w, "d8:announce"+realKey+"e")
+		case "/br":
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Encoding", "br")
+			_, _ = io.WriteString(w, "xx")
+		case "/big":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, strings.Repeat("a", 2048))
+		default:
+			w.Header().Set("Content-Type", "")
+			_, _ = io.WriteString(w, "plain "+realKey)
+		}
+	})
+	rw := &proxy.Rewrite{Key: realKey, Replacement: "jui_TOKEN"}
+	q := "apikey=" + realKey
+	w := do(px, "GET", "/gzip?apikey=jui_TOKEN", "", proxy.Options{Rewrite: rw, RawQuery: &q}, map[string]string{"Range": "bytes=0-5", "Accept-Encoding": "br", "X-Api-Key": "jui_TOKEN"})
+	body := w.Body.String()
+	if w.Code != 200 || strings.Contains(body, realKey) || !strings.Contains(body, "jackett_apikey=jui_TOKEN&amp;path=1") || w.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("gzip: %d %v %s", w.Code, w.Header(), body)
+	}
+	if w.Header().Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Fatalf("content-length %s vs %d", w.Header().Get("Content-Length"), len(body))
+	}
+	if strings.Contains(w.Header().Get("X-Link"), realKey) || !strings.Contains(w.Header().Get("X-Link"), "jui_TOKEN") {
+		t.Fatalf("header not rewritten: %v", w.Header())
+	}
+	if seen.Get("Range") != "" || seen.Get("Accept-Encoding") != "gzip" || seen.Get("X-Api-Key") != "" || seenQuery != q {
+		t.Fatalf("upstream request: %v query %q", seen, seenQuery)
+	}
+
+	w = do(px, "GET", "/config", "", proxy.Options{Rewrite: &proxy.Rewrite{Key: realKey, Replacement: "session", HideConfigKey: true}}, nil)
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil || cfg["api_key"] != proxy.HiddenKey || cfg["note"] != "session" || cfg["port"] != float64(9117) {
+		t.Fatalf("config: %v %s", err, w.Body)
+	}
+	// Torrents pass through byte for byte (headers are still scrubbed).
+	if w = do(px, "GET", "/torrent", "", proxy.Options{Rewrite: rw}, nil); !strings.Contains(w.Body.String(), realKey) || strings.Contains(w.Header().Get("X-Link"), realKey) {
+		t.Fatalf("torrent: %s %v", w.Body, w.Header())
+	}
+	// Missing content type: rewritten.
+	if w = do(px, "GET", "/plain", "", proxy.Options{Rewrite: rw}, nil); w.Body.String() != "plain jui_TOKEN" {
+		t.Fatalf("plain: %s", w.Body)
+	}
+	// Unknown encoding: refused, not passed through.
+	if w = do(px, "GET", "/br", "", proxy.Options{Rewrite: rw}, nil); w.Code != 502 {
+		t.Fatalf("br: %d", w.Code)
+	}
+	// Size cap.
+	px.MaxRewrite = 1024
+	if w = do(px, "GET", "/big", "", proxy.Options{Rewrite: rw}, nil); w.Code != 502 || !strings.Contains(w.Body.String(), "response_too_large") {
+		t.Fatalf("big: %d %s", w.Code, w.Body)
+	}
+	// Without Rewrite nothing is touched.
+	if w = do(px, "GET", "/plain", "", proxy.Options{}, nil); w.Body.String() != "plain "+realKey {
+		t.Fatalf("no rewrite: %s", w.Body)
 	}
 }

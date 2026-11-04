@@ -9,12 +9,14 @@ import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { UserMenu } from "@/components/layout/UserMenu";
 import { Button } from "@/components/ui/button";
 import { authStateQuery } from "@/lib/auth-query";
-import { NAV } from "@/nav";
+import { useRole } from "@/lib/auth-hooks";
+import { navFor } from "@/nav";
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+  const role = useRole();
   return (
     <nav className="flex flex-col gap-0.5 p-3" aria-label="Основное меню">
-      {NAV.map((item) => (
+      {navFor(role).map((item) => (
         <Link
           key={item.path}
           to={item.path}
@@ -34,11 +36,13 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 /** Sidebar footer: running Jackett and UI versions. */
 function SidebarFooter() {
   const { data: auth } = useQuery(authStateQuery);
+  const isAdmin = useRole() === "admin";
+  // Jackett's server config is admin-only; others get the version from auth/state.
   const { data } = useQuery({
     queryKey: qk.serverConfig,
     queryFn: api.serverConfig,
     staleTime: 60_000,
-    enabled: auth?.jackett.ok !== false,
+    enabled: isAdmin && auth?.jackett.ok !== false,
   });
   return (
     <div className="mt-auto space-y-0.5 border-t border-sidebar-border px-5 py-2 text-xs text-muted-foreground">
@@ -51,13 +55,13 @@ function SidebarFooter() {
 /** Red banner when authentication is off. */
 function NoAuthBanner() {
   const { data } = useQuery(authStateQuery);
-  if (data?.mode !== "none") return null;
+  if (!data?.disabled) return null;
   return (
     <div role="alert" className="flex items-start gap-2 bg-red-600 px-3 py-2 text-sm font-medium text-white dark:bg-red-700 md:px-5">
       <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
       <span className="min-w-0">
         Вход отключён: любой, кто откроет адрес, управляет Jackett.{" "}
-        <Link to="/settings" hash="auth" className="underline underline-offset-2">
+        <Link to="/settings" search={{ tab: "panel" }} className="underline underline-offset-2">
           Включить вход
         </Link>
       </span>

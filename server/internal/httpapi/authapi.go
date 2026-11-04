@@ -9,6 +9,7 @@ import (
 	"github.com/bropines/jackett-ui/server/internal/config"
 	"github.com/bropines/jackett-ui/server/internal/jackett"
 	"github.com/bropines/jackett-ui/server/internal/store"
+	"github.com/bropines/jackett-ui/server/internal/users"
 )
 
 type stateProvider struct {
@@ -16,31 +17,49 @@ type stateProvider struct {
 	Name string `json:"name"`
 }
 
+type stateMethods struct {
+	Password  bool            `json:"password"`
+	Providers []stateProvider `json:"providers"`
+	Header    bool            `json:"header"`
+}
+
+type stateUser struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+}
+
 type stateResponse struct {
-	Mode          string          `json:"mode"`
-	SetupRequired bool            `json:"setupRequired"`
-	Authenticated bool            `json:"authenticated"`
-	User          string          `json:"user,omitempty"`
-	PasswordLogin bool            `json:"passwordLogin"`
-	Providers     []stateProvider `json:"providers"`
-	Jackett       jackett.Status  `json:"jackett"`
-	Version       string          `json:"version"`
+	SetupRequired bool           `json:"setupRequired"`
+	Authenticated bool           `json:"authenticated"`
+	Disabled      bool           `json:"disabled"`
+	User          *stateUser     `json:"user"`
+	Methods       stateMethods   `json:"methods"`
+	Jackett       jackett.Status `json:"jackett"`
+	Version       string         `json:"version"`
+}
+
+func loginMethods(eff config.Effective) stateMethods {
+	m := stateMethods{Password: eff.PasswordLogin(), Header: eff.HeaderLogin(), Providers: []stateProvider{}}
+	for _, p := range eff.LoginProviders() {
+		m.Providers = append(m.Providers, stateProvider{ID: p.ID, Name: p.Name.Value})
+	}
+	return m
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request, re *reqEnv) {
 	eff := re.eff
-	id, fail := s.authenticate(w, r, re)
+	pr, fail := s.authenticate(w, r, re)
 	resp := stateResponse{
-		Mode:          eff.Mode.Value,
 		SetupRequired: eff.SetupRequired(),
 		Authenticated: fail == "",
-		User:          id.User,
-		PasswordLogin: eff.PasswordLogin(),
-		Providers:     []stateProvider{},
+		Disabled:      eff.Disabled.Value,
+		Methods:       loginMethods(eff),
 		Version:       s.version,
 	}
-	for _, p := range eff.LoginProviders() {
-		resp.Providers = append(resp.Providers, stateProvider{ID: p.ID, Name: p.Name.Value})
+	if pr != nil && pr.user != nil {
+		resp.User = &stateUser{ID: pr.user.ID, Username: pr.user.Username, Name: pr.user.Name, Role: pr.user.Role}
 	}
 	if s.jc != nil {
 		resp.Jackett = s.jc.Status(r.Context())
@@ -63,52 +82,65 @@ func (s *Server) rateLimit(w http.ResponseWriter, r *http.Request, re *reqEnv) b
 	return true
 }
 
-type passwordBody struct {
-	Password string `json:"password"`
-}
-
-func passwordAPIError(err error) error {
+func passwordAPIError(err error, field string) error {
 	switch {
 	case errors.Is(err, auth.ErrPasswordTooShort):
-		return &apiError{Status: http.StatusBadRequest, Code: "password_too_short", Message: "Пароль должен быть не короче 8 символов", Field: "password"}
+		return &apiError{Status: http.StatusBadRequest, Code: "password_too_short", Message: "Пароль должен быть не короче 8 символов", Field: field}
 	case errors.Is(err, auth.ErrPasswordTooLong):
-		return &apiError{Status: http.StatusBadRequest, Code: "password_too_long", Message: "Пароль длиннее 72 байт", Field: "password"}
+		return &apiError{Status: http.StatusBadRequest, Code: "password_too_long", Message: "Пароль длиннее 72 байт", Field: field}
 	}
 	return err
 }
 
+// usernameArg normalises and validates a user name ("" = def).
+func usernameArg(v, def, field string) (string, error) {
+	v = users.NormalizeUsername(v)
+	if v == "" {
+		v = def
+	}
+	if !users.ValidUsername(v) {
+		return "", &apiError{Status: http.StatusBadRequest, Code: "invalid_username", Message: "Имя пользователя: 2–32 символа, латиница в нижнем регистре, цифры, точка, _ и -", Field: field}
+	}
+	return v, nil
+}
+
+var errUsernameTaken = &apiError{Status: http.StatusConflict, Code: "username_taken", Message: "Такое имя пользователя уже занято", Field: "username"}
+
+type credentialsBody struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv) {
 	if !re.eff.SetupRequired() {
-		writeErr(w, http.StatusConflict, "not_in_setup", "Пароль уже задан")
+		writeErr(w, http.StatusConflict, "not_in_setup", "Администратор уже создан")
 		return
 	}
 	if !s.rateLimit(w, r, re) {
 		return
 	}
-	var body passwordBody
+	var body credentialsBody
 	if err := decodeJSON(w, r, &body); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	name, err := usernameArg(body.Username, store.AdminUsername, "username")
+	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
 	hash, err := auth.HashPassword(body.Password)
 	if err != nil {
-		writeAPIError(w, passwordAPIError(err))
+		writeAPIError(w, passwordAPIError(err, "password"))
 		return
 	}
-	var epoch uint64
+	var u store.User
 	err = s.store.Update(func(st *store.Settings) error {
-		cur, err := config.Resolve(s.env, *st)
-		if err != nil {
-			return err
+		if len(st.Users) > 0 {
+			return &apiError{Status: http.StatusConflict, Code: "not_in_setup", Message: "Администратор уже создан"}
 		}
-		if !cur.SetupRequired() {
-			return &apiError{Status: http.StatusConflict, Code: "not_in_setup", Message: "Пароль уже задан"}
-		}
-		st.Auth.PasswordHash = hash
-		if st.Auth.Mode == "" {
-			st.Auth.Mode = auth.ModePassword
-		}
-		epoch = st.AuthEpoch
+		u = newUser(name, "Администратор", store.RoleAdmin, hash, s.now())
+		st.Users = append(st.Users, u)
 		return nil
 	})
 	if err != nil {
@@ -116,9 +148,26 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv)
 		return
 	}
 	s.limiter.Success(re.rv.ClientIP(r))
-	s.log.Warn("admin password set via the setup wizard", "ip", re.rv.ClientIP(r).String())
-	s.issueSession(w, r, re, auth.AdminUser, auth.ModePassword, epoch)
+	s.log.Warn("first admin created via the setup wizard", "user", name, "ip", re.rv.ClientIP(r).String())
+	// A setup session dies like a password session when password login is
+	// switched off; "setup" only when the password method is off already.
+	method := "password"
+	if !re.eff.PasswordLogin() {
+		method = methodSetup
+	}
+	if err := s.loginSucceeded(w, r, re, u.ID, method); err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// passwordHashOf: the env password wins for the user "admin".
+func passwordHashOf(eff config.Effective, u *store.User) string {
+	if u.Username == store.AdminUsername && eff.AdminPassword.Value != "" {
+		return eff.AdminPassword.Value
+	}
+	return u.PasswordHash
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, re *reqEnv) {
@@ -127,28 +176,44 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request, re *reqEnv)
 		return
 	}
 	if eff.SetupRequired() {
-		writeErr(w, http.StatusConflict, failSetupRequired, "Сначала задайте пароль администратора")
+		writeErr(w, http.StatusConflict, failSetupRequired, "Сначала создайте администратора")
 		return
 	}
 	if !eff.PasswordLogin() {
 		writeErr(w, http.StatusForbidden, "password_login_disabled", "Вход по паролю отключён")
 		return
 	}
-	var body passwordBody
+	var body credentialsBody
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
 		return
 	}
 	ip := re.rv.ClientIP(r)
-	if !auth.CheckPassword(eff.PasswordHash.Value, body.Password) {
+	name := users.NormalizeUsername(body.Username)
+	if name == "" {
+		name = store.AdminUsername // v0.2 clients send only the password
+	}
+	u := users.ByUsername(&re.st, name)
+	hash := ""
+	if u != nil {
+		hash = passwordHashOf(eff, u)
+	}
+	// CheckPassword with an empty hash burns comparable time.
+	if !auth.CheckPassword(hash, body.Password) {
 		s.limiter.Failure(ip)
-		s.log.Warn("login failed", "ip", ip.String(), "method", "password")
-		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "Неверный пароль")
+		s.log.Warn("login failed", "ip", ip.String(), "method", "password", "user", clipName(name))
+		writeErr(w, http.StatusUnauthorized, "invalid_credentials", "Неверное имя пользователя или пароль")
 		return
 	}
 	s.limiter.Success(ip)
-	s.log.Info("login ok", "ip", ip.String(), "user", auth.AdminUser, "method", "password")
-	s.issueSession(w, r, re, auth.AdminUser, eff.Mode.Value, eff.Epoch)
+	if u.Disabled {
+		writeAuthFail(w, failUserDisabled)
+		return
+	}
+	if err := s.loginSucceeded(w, r, re, u.ID, "password"); err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -158,16 +223,30 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, re *reqEnv
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request, re *reqEnv, id auth.Identity) {
-	err := s.store.Update(func(st *store.Settings) error {
-		st.AuthEpoch++
+// bumpUserEpoch ends the sessions of user uid.
+func (s *Server) bumpUserEpoch(uid string) error {
+	return s.store.Update(func(st *store.Settings) error {
+		u := st.User(uid)
+		if u == nil {
+			return errUserNotFound
+		}
+		u.Epoch++
 		return nil
 	})
-	if err != nil {
+}
+
+var errUserNotFound = &apiError{Status: http.StatusNotFound, Code: "user_not_found", Message: "Пользователь не найден"}
+
+func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request, re *reqEnv, pr *principal) {
+	if pr.user == nil {
+		writeAPIError(w, errNoUser)
+		return
+	}
+	if err := s.bumpUserEpoch(pr.user.ID); err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	s.log.Warn("logout on all devices", "user", id.User, "ip", re.rv.ClientIP(r).String())
+	s.log.Warn("logout on all devices", "user", pr.name(), "ip", re.rv.ClientIP(r).String())
 	s.clearSession(w, r, re)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -2,6 +2,7 @@ package session
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,33 +50,34 @@ func TestSessionDecode(t *testing.T) {
 	m := NewManager(key(1))
 	m.Now = func() time.Time { return now }
 	ttl := time.Hour
-	good := m.Encode(m.New("admin", "password", 3, ttl))
+	good := m.Encode(m.New("u_abc", "password", 3, 7, ttl))
 
 	type tc struct {
-		name  string
-		tok   string
-		mode  string
-		epoch uint64
-		at    time.Time
-		ok    bool
+		name string
+		tok  string
+		at   time.Time
+		ok   bool
 	}
 	cases := []tc{
-		{"valid", good, "password", 3, now, true},
-		{"wrong epoch", good, "password", 4, now, false},
-		{"wrong mode", good, "sso", 3, now, false},
-		{"expired", good, "password", 3, now.Add(ttl), false},
-		{"just before expiry", good, "password", 3, now.Add(ttl - time.Second), true},
-		{"empty user", m.Encode(Session{User: "", Mode: "password", Epoch: 3, Expiry: now.Add(ttl).Unix()}), "password", 3, now, false},
-		{"other key", NewManager(key(9)).Encode(m.New("admin", "password", 3, ttl)), "password", 3, now, false},
-		{"garbage", "x.y", "password", 3, now, false},
+		{"valid", good, now, true},
+		{"expired", good, now.Add(ttl), false},
+		{"just before expiry", good, now.Add(ttl - time.Second), true},
+		{"empty uid", m.Encode(Session{V: 2, UID: "", Method: "password", Expiry: now.Add(ttl).Unix()}), now, false},
+		{"empty method", m.Encode(Session{V: 2, UID: "u", Expiry: now.Add(ttl).Unix()}), now, false},
+		{"v0.2 payload", m.Signer.Sign([]byte(`{"u":"admin","m":"password","e":3,"x":` + strconv.FormatInt(now.Add(ttl).Unix(), 10) + `}`)), now, false},
+		{"other key", NewManager(key(9)).Encode(m.New("u", "password", 3, 7, ttl)), now, false},
+		{"garbage", "x.y", now, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			at := c.at
 			m.Now = func() time.Time { return at }
-			_, ok := m.Decode(c.tok, c.mode, c.epoch)
+			s, ok := m.Decode(c.tok)
 			if ok != c.ok {
 				t.Fatalf("ok = %v, want %v", ok, c.ok)
+			}
+			if ok && (s.UID != "u_abc" || s.Method != "password" || s.Epoch != 3 || s.Global != 7) {
+				t.Fatalf("payload %+v", s)
 			}
 		})
 	}
@@ -86,7 +88,7 @@ func TestRenewalAndCookie(t *testing.T) {
 	m := NewManager(key(1))
 	m.Now = func() time.Time { return now }
 	ttl := 10 * time.Hour
-	s := m.New("u", "password", 1, ttl)
+	s := m.New("u", "password", 1, 1, ttl)
 	if m.NeedsRenewal(s, ttl) {
 		t.Fatal("fresh session needs renewal")
 	}

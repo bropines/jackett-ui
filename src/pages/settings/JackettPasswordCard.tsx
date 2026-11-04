@@ -16,8 +16,8 @@ export function JackettPasswordCard() {
     <Section id="jackett-password" title="Пароль администратора Jackett" icon={Lock}>
       <p className="text-sm text-muted-foreground">
         Сервер интерфейса входит в Jackett сам. Если в Jackett задан пароль администратора, передайте его серверу в переменной окружения{" "}
-        <Mono>JACKETT_PASSWORD</Mono> и перезапустите контейнер. Пароль для входа в этот интерфейс настраивается выше, в разделе «Вход и
-        безопасность».
+        <Mono>JACKETT_PASSWORD</Mono> и перезапустите контейнер. Пароли для входа в этот интерфейс у каждого пользователя свои (профиль,
+        вкладка «Пользователи»).
       </p>
       {failed && <p className="text-sm text-destructive">Сейчас сервер не может войти в Jackett: пароль в JACKETT_PASSWORD неверный.</p>}
     </Section>

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bropines/jackett-ui/server/internal/session"
 	"github.com/bropines/jackett-ui/server/internal/store"
 )
 
@@ -17,12 +16,16 @@ type field struct {
 
 type settingsResp struct {
 	Auth struct {
-		Mode             field `json:"mode"`
-		PasswordSet      field `json:"passwordSet"`
-		PasswordFallback field `json:"passwordFallback"`
-		AllowedEmails    field `json:"allowedEmails"`
-		GitHubUsers      field `json:"githubUsers"`
-		Providers        map[string]struct {
+		Methods       map[string]field `json:"methods"`
+		Disabled      field            `json:"disabled"`
+		AutoProvision struct {
+			Enabled field `json:"enabled"`
+			Role    field `json:"role"`
+		} `json:"autoProvision"`
+		AllowedEmails field `json:"allowedEmails"`
+		AdminEmails   field `json:"adminEmails"`
+		GitHubUsers   field `json:"githubUsers"`
+		Providers     map[string]struct {
 			Issuer          field  `json:"issuer"`
 			ClientID        field  `json:"clientId"`
 			ClientSecretSet field  `json:"clientSecretSet"`
@@ -50,17 +53,19 @@ func (h *harness) settings() settingsResp {
 
 func TestSettingsGetLockedAndNoSecrets(t *testing.T) {
 	h := newHarness(t, harnessOpt{
-		env: map[string]string{"OIDC_ISSUER": "https://auth.example.com/app/", "OIDC_CLIENT_ID": "envclient", "OIDC_CLIENT_SECRET": "env-secret-value", "SESSION_TTL": "24h"},
+		env: map[string]string{"OIDC_ISSUER": "https://auth.example.com/app/", "OIDC_CLIENT_ID": "envclient", "OIDC_CLIENT_SECRET": "env-secret-value",
+			"SESSION_TTL": "24h", "AUTH_ADMIN_EMAILS": "boss@example.com"},
 		settings: func(s *store.Settings) {
 			s.Auth.Providers.Google = store.Provider{ClientID: "gid", ClientSecret: "google-secret-value"}
 			s.Auth.AllowedEmails = []string{"me@example.com"}
 		},
 	})
 	h.setup()
+	h.newToken("t")
 	w := h.do("GET", "/_ui/api/settings", nil)
 	h.expect(w, 200)
 	raw := w.Body.String()
-	for _, secret := range []string{"env-secret-value", "google-secret-value", "$2a$", adminPW, jackettPW} {
+	for _, secret := range []string{"env-secret-value", "google-secret-value", "$2a$", adminPW, jackettPW, key, "jui_"} {
 		if strings.Contains(raw, secret) {
 			t.Fatalf("settings leak %q: %s", secret, raw)
 		}
@@ -80,11 +85,36 @@ func TestSettingsGetLockedAndNoSecrets(t *testing.T) {
 	if g.ClientSecretSet.Value != true || g.ClientSecretSet.Locked || g.Verified || g.RedirectURL != "http://ui.test/_ui/auth/google/callback" {
 		t.Fatalf("google: %+v", g)
 	}
-	if !s.SessionTTL.Locked || s.SessionTTL.Value != "24h" || s.PublicURL.Locked || s.Auth.Mode.Value != "password" {
+	if !s.SessionTTL.Locked || s.SessionTTL.Value != "24h" || s.PublicURL.Locked {
 		t.Fatalf("misc: %+v %+v", s.SessionTTL, s.PublicURL)
 	}
-	if s.Auth.PasswordSet.Value != true || s.Auth.PasswordSet.Locked {
-		t.Fatalf("passwordSet %+v", s.Auth.PasswordSet)
+	if len(s.Auth.Methods) != 5 || s.Auth.Methods["password"].Value != true || s.Auth.Methods["oidc"].Value != false || s.Auth.Methods["header"].Locked {
+		t.Fatalf("methods: %+v", s.Auth.Methods)
+	}
+	if s.Auth.Disabled.Value != false || s.Auth.AutoProvision.Enabled.Value != true || s.Auth.AutoProvision.Role.Value != "viewer" {
+		t.Fatalf("disabled/autoProvision: %+v %+v", s.Auth.Disabled, s.Auth.AutoProvision)
+	}
+	if !s.Auth.AdminEmails.Locked || s.Auth.AdminEmails.Env != "AUTH_ADMIN_EMAILS" {
+		t.Fatalf("admin emails: %+v", s.Auth.AdminEmails)
+	}
+	// Methods locked as a block by AUTH_METHODS.
+	h2 := newHarness(t, harnessOpt{env: map[string]string{"AUTH_METHODS": "password", "AUTH_DEFAULT_ROLE": "editor"}})
+	h2.setup()
+	s2 := h2.settings()
+	for id, f := range s2.Auth.Methods {
+		if !f.Locked || f.Env != "AUTH_METHODS" {
+			t.Fatalf("%s: %+v", id, f)
+		}
+	}
+	if !s2.Auth.AutoProvision.Role.Locked || s2.Auth.AutoProvision.Role.Value != "editor" {
+		t.Fatalf("role: %+v", s2.Auth.AutoProvision.Role)
+	}
+	if w := h2.put(`{"auth":{"methods":{"password":true,"oidc":true}}}`); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("locked methods: %d %s", w.Code, w.Body)
+	}
+	h2.expect(h2.put(`{"auth":{"methods":{"password":true}}}`), 200) // same value is fine
+	if w := h2.put(`{"auth":{"autoProvision":{"role":"admin"}}}`); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("locked role: %d", w.Code)
 	}
 }
 
@@ -101,24 +131,26 @@ func TestSettingsPutRules(t *testing.T) {
 	steps := []step{
 		{"empty is fine", `{}`, 200, "", ""},
 		{"unknown field", `{"bogus":1}`, 400, "bad_request", ""},
+		{"v0.2 mode is gone", `{"auth":{"mode":"password"}}`, 400, "bad_request", ""},
+		{"v0.2 password is gone", `{"password":{"current":"a","new":"b"}}`, 400, "bad_request", ""},
 		{"locked field change", `{"auth":{"providers":{"oidc":{"clientId":"other"}}}}`, 409, "locked", "auth.providers.oidc.clientId"},
 		{"locked field same value", `{"auth":{"providers":{"oidc":{"clientId":"envclient"}}}}`, 200, "", ""},
 		{"locked ttl same duration", `{"sessionTtl":"24h0m0s"}`, 200, "", ""},
 		{"locked ttl change", `{"sessionTtl":"48h"}`, 409, "locked", "sessionTtl"},
-		{"bad mode", `{"auth":{"mode":"ldap"}}`, 400, "invalid_value", "auth.mode"},
-		{"none needs confirm", `{"auth":{"mode":"none"}}`, 400, "confirm_required", "auth.mode"},
-		{"header needs trusted", `{"auth":{"mode":"header"}}`, 400, "header_trusted_required", "auth.header.trusted"},
+		{"disable needs confirm", `{"auth":{"disabled":true}}`, 400, "confirm_required", "auth.disabled"},
+		{"header needs trusted", `{"auth":{"methods":{"password":true,"header":true}}}`, 400, "header_trusted_required", "auth.header.trusted"},
 		{"bad cidr", `{"auth":{"header":{"trusted":["10.0.0.0/99"]}}}`, 400, "invalid_value", "auth.header.trusted"},
 		{"bad header name", `{"auth":{"header":{"name":"Bad Header"}}}`, 400, "invalid_value", "auth.header.name"},
-		{"header lockout (caller not via proxy)", `{"auth":{"mode":"header","header":{"trusted":["10.0.0.0/8"]}}}`, 409, "header_lockout", ""},
-		{"sso unverified", `{"auth":{"mode":"sso"}}`, 409, "sso_not_ready", ""},
+		{"header only, caller not via proxy", `{"auth":{"methods":{"password":false,"header":true},"header":{"trusted":["10.0.0.0/8"]}}}`, 409, "would_lock_out", "auth.methods"},
+		{"no method at all", `{"auth":{"methods":{"password":false}}}`, 409, "would_lock_out", "auth.methods"},
+		{"unverified provider", `{"auth":{"methods":{"password":true,"google":true}}}`, 409, "provider_not_ready", "auth.methods.google"},
+		{"bad role", `{"auth":{"autoProvision":{"role":"root"}}}`, 400, "invalid_value", "auth.autoProvision.role"},
+		{"good role", `{"auth":{"autoProvision":{"enabled":false,"role":"Editor"}}}`, 200, "", ""},
+		{"admin emails", `{"auth":{"adminEmails":["Boss@x.com"," ",""]}}`, 200, "", ""},
 		{"oidc-only field on google", `{"auth":{"providers":{"google":{"issuer":"https://x"}}}}`, 400, "invalid_value", "auth.providers.google.issuer"},
 		{"bad issuer", `{"auth":{"providers":{"oidc":{"issuer":"ftp://x"}}}}`, 400, "invalid_value", "auth.providers.oidc.issuer"},
 		{"bad public url", `{"publicUrl":"https://x.com/sub"}`, 400, "invalid_value", "publicUrl"},
 		{"good public url", `{"publicUrl":"https://Jackett.Example.com/"}`, 200, "", ""},
-		{"wrong current password", `{"password":{"current":"nope-nope","new":"new-password-1"}}`, 403, "invalid_credentials", "password.current"},
-		{"short new password", `{"password":{"current":"` + adminPW + `","new":"short"}}`, 400, "password_too_short", "password.new"},
-		{"password twice", `{"password":{"current":"a","new":"b"},"auth":{"password":{"current":"a","new":"b"}}}`, 400, "invalid_value", "password"},
 	}
 	for _, s := range steps {
 		t.Run(s.name, func(t *testing.T) {
@@ -142,9 +174,19 @@ func TestSettingsPutRules(t *testing.T) {
 			}
 		})
 	}
-	if got := h.settings().PublicURL.Value; got != "https://jackett.example.com" {
-		t.Fatalf("publicUrl normalised to %v", got)
+	s := h.settings()
+	if s.PublicURL.Value != "https://jackett.example.com" {
+		t.Fatalf("publicUrl normalised to %v", s.PublicURL.Value)
 	}
+	st := h.store.Get().Auth
+	if st.AutoProvision.Enabled || st.AutoProvision.Role != "editor" || len(st.AdminEmails) != 1 || st.Methods != (store.Methods{Password: true}) {
+		t.Fatalf("stored: %+v", st)
+	}
+	// Settings are admin-only.
+	h.createUser("ed", "editor", "editor-password")
+	ed := h.as("ed", "editor-password")
+	ed.expect(ed.do("GET", "/_ui/api/settings", nil), 403)
+	ed.expect(ed.put(`{}`), 403)
 }
 
 func TestSettingsSecretsAndLists(t *testing.T) {
@@ -158,7 +200,6 @@ func TestSettingsSecretsAndLists(t *testing.T) {
 	if strings.Join(st.Auth.AllowedEmails, ",") != "a@x.com,b@x.com" || st.Auth.Providers.GitHub.ClientSecret != "gh-secret" {
 		t.Fatalf("stored: %+v", st.Auth)
 	}
-	// "" keeps the secret, null clears it.
 	h.expect(h.put(map[string]any{"auth": map[string]any{"providers": map[string]any{"github": map[string]any{"clientSecret": ""}}}}), 200)
 	if h.store.Get().Auth.Providers.GitHub.ClientSecret != "gh-secret" {
 		t.Fatal("empty secret cleared the stored one")
@@ -173,26 +214,29 @@ func TestSettingsSecretsAndLists(t *testing.T) {
 	}
 }
 
-func TestPasswordChangeBumpsEpoch(t *testing.T) {
+func TestDisableLoginAndBack(t *testing.T) {
 	h := newHarness(t, harnessOpt{})
 	h.setup()
-	other := h.clone()
-	other.expect(other.login(adminPW), 204)
-	old := h.jar[session.CookieName]
-	epoch := h.store.Get().AuthEpoch
-
-	w := h.put(map[string]any{"password": map[string]string{"current": adminPW, "new": "brand-new-pass"}})
-	h.expect(w, 200)
-	if h.store.Get().AuthEpoch != epoch+1 {
-		t.Fatal("epoch not bumped")
+	anon := h.clone()
+	h.expect(h.put(`{"auth":{"disabled":true},"confirm":true}`), 200)
+	if st := anon.state(); !st.Authenticated || !st.Disabled || st.User != nil {
+		t.Fatalf("%+v", st)
 	}
-	if h.jar[session.CookieName] == old {
-		t.Fatal("caller's cookie not re-issued")
+	anon.expect(anon.do("GET", "/api/v2.0/server/config", nil), 200)
+	// Re-enable (as the anonymous admin): the admin has a password → fine.
+	anon.expect(anon.put(`{"auth":{"disabled":false}}`), 200)
+	anon.expect(anon.do("GET", "/_ui/api/settings", nil), 401)
+	h.expect(h.do("GET", "/_ui/api/settings", nil), 200) // the old session is valid again
+	// Re-enabling with no usable method for any admin is refused.
+	h.expect(h.put(`{"auth":{"disabled":true},"confirm":true}`), 200)
+	if w := anon.put(`{"auth":{"disabled":false,"methods":{"password":false}}}`); w.Code != 409 || errorCode(w) != "would_lock_out" {
+		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	h.expect(h.do("GET", "/_ui/api/settings", nil), 200)         // caller keeps access
-	other.expect(other.do("GET", "/_ui/api/settings", nil), 401) // other sessions die
-	other.expect(other.login(adminPW), 401)
-	other.expect(other.login("brand-new-pass"), 204)
+	// The env lock.
+	h2 := newHarness(t, harnessOpt{env: map[string]string{"AUTH_DISABLED": "true"}})
+	if w := h2.put(`{"auth":{"disabled":false}}`); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("env lock: %d", w.Code)
+	}
 }
 
 func TestEnvPasswordIsLocked(t *testing.T) {
@@ -200,56 +244,33 @@ func TestEnvPasswordIsLocked(t *testing.T) {
 	if h.state().SetupRequired {
 		t.Fatal("env password still requires setup")
 	}
+	admin := h.userByName("admin")
+	if admin.Role != "admin" || admin.PasswordHash != "" {
+		t.Fatalf("env admin: %+v", admin)
+	}
 	h.expect(h.login("env-password-1"), 204)
-	w := h.put(map[string]any{"password": map[string]string{"current": "env-password-1", "new": "something-else"}})
+	w := h.do("POST", "/_ui/api/me/password", map[string]string{"current": "env-password-1", "new": "something-else"})
 	if w.Code != 409 || errorCode(w) != "locked" {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	s := h.settings()
-	if !s.Auth.PasswordSet.Locked || s.Auth.PasswordSet.Env != "AUTH_PASSWORD" {
-		t.Fatalf("%+v", s.Auth.PasswordSet)
+	me := decode[meResponse](t, h.do("GET", "/_ui/api/me", nil))
+	if !me.User.PasswordSet || !me.User.PasswordLocked {
+		t.Fatalf("me: %+v", me.User)
+	}
+	if w := h.do("PATCH", "/_ui/api/users/"+admin.ID, map[string]any{"password": "other-password"}); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("admin reset: %d", w.Code)
+	}
+	if w := h.do("DELETE", "/_ui/api/users/"+admin.ID, nil, xhr); w.Code != 409 || errorCode(w) != "locked" {
+		t.Fatalf("delete env admin: %d", w.Code)
 	}
 	// AUTH_PASSWORD never reaches the disk.
 	if strings.Contains(string(mustJSON(h.store.Get())), "$2a$") {
 		t.Fatal("env password hash written to the settings file")
 	}
-	// Mode locked by env.
-	h2 := newHarness(t, harnessOpt{env: map[string]string{"AUTH_MODE": "password", "AUTH_PASSWORD": "env-password-1"}})
-	h2.expect(h2.login("env-password-1"), 204)
-	if w := h2.put(`{"auth":{"mode":"none"},"confirm":true}`); w.Code != 409 || errorCode(w) != "locked" {
-		t.Fatalf("locked mode: %d %s", w.Code, w.Body)
+	// Restart with the same env: no second admin.
+	if err := ensureEnvAdmin(h.srv.env, h.store, h.srv.now()); err != nil || len(h.store.Get().Users) != 1 {
+		t.Fatalf("ensure twice: %v %d", err, len(h.store.Get().Users))
 	}
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-
-func TestModeSwitches(t *testing.T) {
-	h := newHarness(t, harnessOpt{})
-	h.setup()
-	anon := h.clone()
-
-	// → none (confirmed): everyone is in; the caller's cookie is cleared.
-	h.expect(h.put(`{"auth":{"mode":"none"},"confirm":true}`), 200)
-	if st := anon.state(); !st.Authenticated || st.Mode != "none" {
-		t.Fatalf("%+v", st)
-	}
-	// → password: password exists, caller gets an admin session.
-	epoch := h.store.Get().AuthEpoch
-	h.expect(h.put(`{"auth":{"mode":"password"}}`), 200)
-	if h.store.Get().AuthEpoch != epoch+1 {
-		t.Fatal("mode change did not bump epoch")
-	}
-	if st := h.state(); !st.Authenticated || st.User != "admin" {
-		t.Fatalf("caller lost access: %+v", st)
-	}
-	anon.expect(anon.do("GET", "/_ui/api/settings", nil), 401)
-
-	// → header from the trusted proxy with the header: allowed.
-	via := h.clone()
-	via.jar = h.jar
-	via.remote = "10.0.0.5:1"
-	w := via.put(`{"auth":{"mode":"header","header":{"trusted":["10.0.0.0/8"],"name":"X-User"}}}`, hdr("X-User", "bob"))
-	via.expect(w, 200)
-	via.expect(via.do("GET", "/_ui/api/settings", nil, hdr("X-User", "bob")), 200)
-	h.expect(h.do("GET", "/_ui/api/settings", nil), 401) // direct, no proxy
-}

@@ -1,21 +1,21 @@
 /**
- * "Вход и безопасность" card: UI server settings (GET /_ui/api/settings) ⇄ form state ⇄
- * partial PUT patch. Only changed, unlocked fields go into the patch; an empty secret
- * means "unchanged".
+ * «Панель» tab: UI server settings (GET /_ui/api/settings) ⇄ form state ⇄ partial PUT patch.
+ * Only changed, unlocked fields go into the patch; an empty secret means "unchanged".
  *
  * Fields are addressed by their server path ("auth.providers.oidc.issuer"): the same key is
  * used for locks, env var hints, client validation and server errors (`{error, field}`).
  */
 import {
+  METHOD_IDS,
   PROVIDER_IDS,
-  type AuthMode,
   type Locked,
+  type MethodId,
   type ProviderFields,
   type ProviderId,
+  type Role,
   type UiSettings,
   type UiSettingsPatch,
 } from "@/api/server";
-import { MIN_PASSWORD, newPasswordError } from "@/lib/auth";
 
 export interface ProviderForm {
   clientId: string;
@@ -34,32 +34,33 @@ export interface ProviderForm {
 }
 
 export interface AuthForm {
-  mode: AuthMode;
-  passwordFallback: boolean;
+  methods: Record<MethodId, boolean>;
+  disabled: boolean;
+  autoProvision: boolean;
+  defaultRole: Role;
   providers: Record<ProviderId, ProviderForm>;
   /** Comma/newline separated. */
   allowedEmails: string;
+  adminEmails: string;
   githubUsers: string;
   headerName: string;
   headerTrusted: string;
   publicUrl: string;
   sessionTtl: string;
-  pwCurrent: string;
-  pwNew: string;
-  pwRepeat: string;
 }
 
-/** Field path, e.g. "auth.mode", "auth.providers.github.clientSecret", "publicUrl". */
+/** Field path, e.g. "auth.methods.oidc", "auth.providers.github.clientSecret", "publicUrl". */
 export type FieldPath = string;
 export type AuthErrors = Partial<Record<FieldPath, string>>;
 
 export const P = {
-  mode: "auth.mode",
-  passwordFallback: "auth.passwordFallback",
-  password: "auth.password",
-  passwordCurrent: "auth.password.current",
-  passwordRepeat: "auth.password.repeat",
+  methods: "auth.methods",
+  method: (id: MethodId) => `auth.methods.${id}`,
+  disabled: "auth.disabled",
+  autoProvision: "auth.autoProvision.enabled",
+  defaultRole: "auth.autoProvision.role",
   allowedEmails: "auth.allowedEmails",
+  adminEmails: "auth.adminEmails",
   githubUsers: "auth.githubUsers",
   headerName: "auth.header.name",
   headerTrusted: "auth.header.trusted",
@@ -68,12 +69,14 @@ export const P = {
   provider: (id: ProviderId, field: keyof ProviderFields) => `auth.providers.${id}.${field}`,
 } as const;
 
-/** Field path → env var that locks it (docs/server-spec.md, Amendment 1). */
+/** Field path → env var that locks it (fallback when the server doesn't send `env`). */
 export const ENV_VARS: Record<FieldPath, string> = {
-  [P.mode]: "AUTH_MODE",
-  [P.passwordFallback]: "AUTH_PASSWORD_FALLBACK",
-  [P.password]: "AUTH_PASSWORD / AUTH_PASSWORD_HASH",
+  [P.methods]: "AUTH_METHODS",
+  [P.disabled]: "AUTH_DISABLED",
+  [P.autoProvision]: "AUTH_AUTO_PROVISION",
+  [P.defaultRole]: "AUTH_DEFAULT_ROLE",
   [P.allowedEmails]: "AUTH_ALLOWED_EMAILS",
+  [P.adminEmails]: "AUTH_ADMIN_EMAILS",
   [P.githubUsers]: "GITHUB_USERS",
   [P.headerName]: "AUTH_HEADER_NAME",
   [P.headerTrusted]: "AUTH_HEADER_TRUSTED",
@@ -95,36 +98,34 @@ export const ENV_VARS: Record<FieldPath, string> = {
 
 /** Normalizes a field path from the server or the form to the path that carries the lock. */
 export function lockPath(path: FieldPath): FieldPath {
-  if (path === "auth.passwordSet" || path.startsWith("auth.password.")) return P.password;
   return path.replace(/\.clientSecretSet$/, ".clientSecret");
 }
 
-/** Reads the `Locked<…>` node behind a field path (secrets → `clientSecretSet`, password → `passwordSet`). */
+/** Reads the `Locked<…>` node behind a field path (secrets → `clientSecretSet`). */
 function lockedNode(s: UiSettings, path: FieldPath): Locked<unknown> | undefined {
-  let p = lockPath(path);
-  if (p === P.password) p = "auth.passwordSet";
-  p = p.replace(/\.clientSecret$/, ".clientSecretSet");
+  const p = lockPath(path).replace(/\.clientSecret$/, ".clientSecretSet");
   let node: unknown = s;
   for (const part of p.split(".")) node = node && typeof node === "object" ? (node as Record<string, unknown>)[part] : undefined;
   return node && typeof node === "object" && "locked" in node ? (node as Locked<unknown>) : undefined;
 }
 
 export function isLocked(s: UiSettings, path: FieldPath): boolean {
+  if (path === P.methods) return METHOD_IDS.some((m) => !!s.auth.methods?.[m]?.locked);
   return !!lockedNode(s, path)?.locked;
 }
 
 /** "задано переменной окружения OIDC_ISSUER" for locked fields, else undefined. */
 export function lockedHint(s: UiSettings, path: FieldPath): string | undefined {
   if (!isLocked(s, path)) return undefined;
-  const env = ENV_VARS[lockPath(path)];
+  const methodsNode = path === P.methods ? METHOD_IDS.map((m) => s.auth.methods?.[m]).find((n) => n?.locked) : undefined;
+  const node = methodsNode ?? lockedNode(s, path);
+  const env = node?.env || ENV_VARS[lockPath(path)] || (path.startsWith(`${P.methods}.`) ? ENV_VARS[P.methods] : undefined);
   return env ? `задано переменной окружения ${env}` : "задано переменной окружения";
 }
 
 /** Maps a server error field path to the form field path that shows it. */
 export function errorPath(path: string | undefined): FieldPath | undefined {
   if (!path) return undefined;
-  if (path === P.passwordCurrent) return path;
-  if (path === "auth.passwordSet" || path.startsWith("auth.password")) return P.password;
   return path.replace(/\.clientSecretSet$/, ".clientSecret");
 }
 
@@ -153,21 +154,23 @@ function providerForm(s: UiSettings, id: ProviderId): ProviderForm {
   };
 }
 
+const methodValue = (s: UiSettings, m: MethodId) => !!s.auth.methods?.[m]?.value;
+
 export function toAuthForm(s: UiSettings): AuthForm {
   const a = s.auth;
   return {
-    mode: a.mode.value,
-    passwordFallback: a.passwordFallback.value,
+    methods: Object.fromEntries(METHOD_IDS.map((m) => [m, methodValue(s, m)])) as Record<MethodId, boolean>,
+    disabled: !!a.disabled?.value,
+    autoProvision: !!a.autoProvision?.enabled.value,
+    defaultRole: a.autoProvision?.role.value ?? "viewer",
     providers: { oidc: providerForm(s, "oidc"), google: providerForm(s, "google"), github: providerForm(s, "github") },
     allowedEmails: joinList(a.allowedEmails.value),
+    adminEmails: joinList(a.adminEmails?.value),
     githubUsers: joinList(a.githubUsers.value),
     headerName: a.header.name.value ?? "",
     headerTrusted: joinList(a.header.trusted.value),
     publicUrl: s.publicUrl.value ?? "",
     sessionTtl: s.sessionTtl.value ?? "",
-    pwCurrent: "",
-    pwNew: "",
-    pwRepeat: "",
   };
 }
 
@@ -216,8 +219,8 @@ export function providerCoreChanged(f: AuthForm, s: UiSettings, id: ProviderId):
   return false;
 }
 
-/** A provider is enabled when its client id is set. */
-export function providerEnabled(f: AuthForm, id: ProviderId): boolean {
+/** A provider is configured when its client id is set. */
+export function providerConfigured(f: AuthForm, id: ProviderId): boolean {
   return f.providers[id].clientId.trim() !== "";
 }
 
@@ -229,18 +232,14 @@ export function providerVerified(f: AuthForm, s: UiSettings, id: ProviderId, tes
   return s.auth.providers[id].verified && !providerCoreChanged(f, s, id);
 }
 
-/** Enabled providers that are not verified (they would not get a login button). */
-export function unverifiedProviders(f: AuthForm, s: UiSettings, tested: TestedKeys): ProviderId[] {
-  return PROVIDER_IDS.filter((id) => providerEnabled(f, id) && !providerVerified(f, s, id, tested));
-}
-
-export function anyVerifiedProvider(f: AuthForm, s: UiSettings, tested: TestedKeys): boolean {
-  return PROVIDER_IDS.some((id) => providerEnabled(f, id) && providerVerified(f, s, id, tested));
-}
-
-/** External logins are refused while every allow-list is empty (secure default). */
+/** Auto-provisioning through providers is refused while every allow-list is empty (secure default). */
 export function allowListsEmpty(f: AuthForm): boolean {
-  return !parseList(f.allowedEmails).length && !parseList(f.githubUsers).length && !parseList(f.providers.oidc.allowedGroups).length;
+  return (
+    !parseList(f.allowedEmails).length &&
+    !parseList(f.adminEmails).length &&
+    !parseList(f.githubUsers).length &&
+    !parseList(f.providers.oidc.allowedGroups).length
+  );
 }
 
 /** Builds the partial PUT body: only changed, unlocked fields. */
@@ -250,19 +249,22 @@ export function buildPatch(f: AuthForm, s: UiSettings): UiSettingsPatch {
   const auth: NonNullable<UiSettingsPatch["auth"]> = {};
   const providers: NonNullable<NonNullable<UiSettingsPatch["auth"]>["providers"]> = {};
   const header: NonNullable<NonNullable<UiSettingsPatch["auth"]>["header"]> = {};
+  const auto: NonNullable<NonNullable<UiSettingsPatch["auth"]>["autoProvision"]> = {};
   const free = (path: FieldPath) => !isLocked(s, path);
 
-  if (free(P.mode) && f.mode !== a.mode.value) {
-    auth.mode = f.mode;
-    if (f.mode === "none") patch.confirm = true;
+  if (free(P.methods) && METHOD_IDS.some((m) => f.methods[m] !== methodValue(s, m))) auth.methods = { ...f.methods };
+  if (free(P.disabled) && f.disabled !== !!a.disabled?.value) {
+    auth.disabled = f.disabled;
+    if (f.disabled) patch.confirm = true;
   }
-  if (free(P.passwordFallback) && f.passwordFallback !== a.passwordFallback.value) auth.passwordFallback = f.passwordFallback;
-  if (free(P.password) && f.pwNew) {
-    auth.password = a.passwordSet.value ? { current: f.pwCurrent, new: f.pwNew } : { new: f.pwNew };
-  }
+  if (free(P.autoProvision) && f.autoProvision !== !!a.autoProvision?.enabled.value) auto.enabled = f.autoProvision;
+  if (free(P.defaultRole) && f.defaultRole !== (a.autoProvision?.role.value ?? "viewer")) auto.role = f.defaultRole;
+  if (Object.keys(auto).length) auth.autoProvision = auto;
 
   const emails = parseList(f.allowedEmails);
   if (free(P.allowedEmails) && !sameList(emails, a.allowedEmails.value)) auth.allowedEmails = emails;
+  const admins = parseList(f.adminEmails);
+  if (free(P.adminEmails) && !sameList(admins, a.adminEmails?.value)) auth.adminEmails = admins;
   const ghUsers = parseList(f.githubUsers);
   if (free(P.githubUsers) && !sameList(ghUsers, a.githubUsers.value)) auth.githubUsers = ghUsers;
 
@@ -314,6 +316,7 @@ const HTTP_URL = /^https?:\/\/[^\s/]+/i;
 const CIDR = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]*:[0-9a-f:.]*)\/\d{1,3}$/i;
 /** Go duration: 168h, 30m, 1h30m, 90s. */
 const DURATION = /^(?:\d+(?:\.\d+)?(?:h|m|s|ms))+$/;
+const EMAIL = /^[^\s@]+@[^\s@]+$/;
 
 export function isCidr(v: string): boolean {
   if (!CIDR.test(v)) return false;
@@ -326,43 +329,31 @@ export function isCidr(v: string): boolean {
 export function validateAuthForm(f: AuthForm, s: UiSettings, tested: TestedKeys): AuthErrors {
   const e: AuthErrors = {};
   const free = (path: FieldPath) => !isLocked(s, path);
-  const a = s.auth;
 
-  // Password change / set.
-  if (free(P.password)) {
-    if (f.pwNew || f.pwRepeat || f.pwCurrent) {
-      const err = newPasswordError(f.pwNew, f.pwRepeat);
-      if (f.pwNew.length < MIN_PASSWORD) e[P.password] = err;
-      else if (err) e[P.passwordRepeat] = err;
-      if (a.passwordSet.value && !f.pwCurrent) e[P.passwordCurrent] = "Введите текущий пароль";
+  // Methods: at least one, providers only when configured and verified, header needs its settings.
+  if (free(P.methods) && !f.disabled) {
+    if (!METHOD_IDS.some((m) => f.methods[m])) e[P.methods] = "Включите хотя бы один способ входа";
+    for (const id of PROVIDER_IDS) {
+      if (!f.methods[id]) continue;
+      if (!providerConfigured(f, id)) e[P.method(id)] = "Сначала укажите Client ID провайдера ниже";
+      else if (!providerVerified(f, s, id, tested)) e[P.method(id)] = "Нажмите «Проверить вход» у провайдера ниже и войдите у него";
     }
-    if (f.mode === "password" && !a.passwordSet.value && !f.pwNew) e[P.password] = "Задайте пароль, чтобы включить вход по паролю";
+  }
+  // A provider that is on must stay verified when its core settings change.
+  for (const id of PROVIDER_IDS) {
+    if (f.methods[id] && providerConfigured(f, id) && providerCoreChanged(f, s, id) && !providerVerified(f, s, id, tested)) {
+      e[P.provider(id, "clientId")] ??= "Настройки изменились: проверьте вход перед сохранением";
+    }
   }
 
-  // Providers.
   const oidc = f.providers.oidc;
   const issuerPath = P.provider("oidc", "issuer");
   if (free(issuerPath)) {
     if (oidc.issuer.trim() && !HTTP_URL.test(oidc.issuer.trim())) e[issuerPath] = "Адрес вида https://auth.example.com/…";
-    else if (providerEnabled(f, "oidc") && !oidc.issuer.trim()) e[issuerPath] = "Нужен, когда задан Client ID";
+    else if (providerConfigured(f, "oidc") && !oidc.issuer.trim()) e[issuerPath] = "Нужен, когда задан Client ID";
   }
 
-  if (f.mode === "sso") {
-    const switching = f.mode !== a.mode.value;
-    if (!anyVerifiedProvider(f, s, tested)) {
-      e[P.mode] = switching
-        ? "Сначала настройте провайдера, нажмите «Проверить вход» и войдите у него"
-        : "Нет ни одного проверенного провайдера: проверьте вход перед сохранением";
-    }
-    for (const id of PROVIDER_IDS) {
-      if (providerEnabled(f, id) && providerCoreChanged(f, s, id) && !providerVerified(f, s, id, tested)) {
-        e[P.provider(id, "clientId")] ??= "Настройки изменились: проверьте вход перед сохранением";
-      }
-    }
-  }
-
-  // Header mode.
-  if (f.mode === "header") {
+  if (f.methods.header) {
     if (free(P.headerName) && !f.headerName.trim()) e[P.headerName] = "Укажите имя заголовка";
     if (free(P.headerTrusted) && parseList(f.headerTrusted).length === 0) e[P.headerTrusted] = "Укажите хотя бы одну сеть прокси, например 172.16.0.0/12";
   }
@@ -371,9 +362,10 @@ export function validateAuthForm(f: AuthForm, s: UiSettings, tested: TestedKeys)
     if (bad.length) e[P.headerTrusted] = `Не похоже на сеть CIDR: ${bad.join(", ")}`;
   }
 
-  if (free(P.allowedEmails)) {
-    const bad = parseList(f.allowedEmails).filter((x) => !/^[^\s@]+@[^\s@]+$/.test(x));
-    if (bad.length) e[P.allowedEmails] = `Не похоже на e-mail: ${bad.join(", ")}`;
+  for (const path of [P.allowedEmails, P.adminEmails] as const) {
+    if (!free(path)) continue;
+    const bad = parseList(path === P.allowedEmails ? f.allowedEmails : f.adminEmails).filter((x) => !EMAIL.test(x));
+    if (bad.length) e[path] = `Не похоже на e-mail: ${bad.join(", ")}`;
   }
 
   if (free(P.publicUrl) && f.publicUrl.trim() && !HTTP_URL.test(f.publicUrl.trim())) e[P.publicUrl] = "Адрес вида https://jackett.example.com";

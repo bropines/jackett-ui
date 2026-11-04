@@ -53,6 +53,9 @@ type Client struct {
 	StatusTTL time.Duration
 	// LoginTimeout bounds one login (POST + probe).
 	LoginTimeout time.Duration
+	// KeyTTL: how long the API key read from server/config is used before
+	// it is read again.
+	KeyTTL time.Duration
 
 	mu        sync.Mutex
 	cookies   []*http.Cookie
@@ -61,6 +64,8 @@ type Client struct {
 	lastErr   error
 	lastTry   time.Time
 	version   string
+	apiKey    string
+	keyAt     time.Time
 	status    Status
 	statusAt  time.Time
 	statusSet bool
@@ -87,6 +92,7 @@ func New(base *url.URL, password string, transport http.RoundTripper, log *slog.
 		FailBackoff:  5 * time.Second,
 		StatusTTL:    15 * time.Second,
 		LoginTimeout: 15 * time.Second,
+		KeyTTL:       5 * time.Minute,
 	}
 }
 
@@ -282,9 +288,15 @@ func (c *Client) probe(ctx context.Context, cookie string) (version string, chal
 	}
 	var cfg struct {
 		AppVersion string `json:"app_version"`
+		APIKey     string `json:"api_key"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cfg); err != nil {
 		return "", false, fmt.Errorf("%w: server/config: %v", ErrUnreachable, err)
+	}
+	if k := strings.TrimSpace(cfg.APIKey); k != "" {
+		c.mu.Lock()
+		c.apiKey, c.keyAt = k, time.Now()
+		c.mu.Unlock()
 	}
 	v := cfg.AppVersion
 	if v != "" && !strings.HasPrefix(v, "v") {
@@ -307,4 +319,47 @@ func IsLoginChallenge(resp *http.Response) bool {
 		}
 	}
 	return false
+}
+
+// APIKey returns Jackett's API key (read from server/config by the login
+// probe), re-reading it when older than KeyTTL. The key never leaves the
+// server: the proxy injects it upstream and scrubs it from responses. If a
+// refresh fails, the last known key is returned (so scrubbing keeps working).
+func (c *Client) APIKey(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	k, at := c.apiKey, c.keyAt
+	c.mu.Unlock()
+	if k != "" && time.Since(at) < c.KeyTTL {
+		return k, nil
+	}
+	c.mu.Lock()
+	c.statusSet = false
+	c.mu.Unlock()
+	st := c.Status(ctx)
+	c.mu.Lock()
+	k = c.apiKey
+	c.mu.Unlock()
+	if k != "" {
+		return k, nil
+	}
+	if st.Error == ErrLoginFailed.Error() {
+		return "", ErrLoginFailed
+	}
+	return "", ErrUnreachable
+}
+
+// KnownAPIKey returns the last known API key without network I/O ("" if
+// none yet).
+func (c *Client) KnownAPIKey() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.apiKey
+}
+
+// InvalidateAPIKey makes the next APIKey call read the key again (after a
+// change of Jackett's server settings).
+func (c *Client) InvalidateAPIKey() {
+	c.mu.Lock()
+	c.keyAt = time.Time{}
+	c.mu.Unlock()
 }

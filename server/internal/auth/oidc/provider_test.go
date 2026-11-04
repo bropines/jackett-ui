@@ -314,6 +314,9 @@ func TestHappyPath(t *testing.T) {
 	if res.Identity.User != "Alice@Example.com" || res.Identity.Email != "Alice@Example.com" {
 		t.Fatalf("identity = %+v", res.Identity)
 	}
+	if id := res.Identity; id.Subject != "user-123" || id.Issuer != idp.issuer() || !id.EmailVerified || !id.EmailVerifiedPresent || !id.EmailUsable(false) {
+		t.Fatalf("subject/issuer/verified = %+v", id)
+	}
 	if strings.Join(res.Identity.Groups, ",") != "users,Media" {
 		t.Fatalf("groups = %v", res.Identity.Groups)
 	}
@@ -346,6 +349,19 @@ func TestUserFallbacks(t *testing.T) {
 	})
 	if err != nil || res.Identity.User != "user-123" || res.Identity.Groups != nil {
 		t.Fatalf("sub: %+v %v", res, err)
+	}
+	// Profile claims and email_verified variants.
+	res, err, _ = login(t, idp, p, func(c map[string]any) {
+		c["name"] = " Alice A. "
+		c["preferred_username"] = "alice"
+		delete(c, "email_verified")
+	})
+	if id := res.Identity; err != nil || id.Name != "Alice A." || id.PreferredUsername != "alice" || id.EmailVerifiedPresent || !id.EmailUsable(false) {
+		t.Fatalf("profile: %+v %v", res.Identity, err)
+	}
+	unverified := Identity{Email: "a@b", EmailVerifiedPresent: true}
+	if unverified.EmailUsable(false) || !unverified.EmailUsable(true) || (Identity{}).EmailUsable(true) {
+		t.Fatal("EmailUsable")
 	}
 }
 
@@ -614,6 +630,15 @@ func TestFlowTestToken(t *testing.T) {
 	}
 	if got := FlowTestToken(httptest.NewRequest("GET", "/", nil), testSigner); got != "" {
 		t.Fatalf("no cookie: %q", got)
+	}
+	s = start(t, p, "/profile?x=1", "link:u_1", false)
+	r = httptest.NewRequest("GET", "/_ui/auth/oidc/callback", nil)
+	r.AddCookie(&http.Cookie{Name: FlowCookie, Value: s.cookie.Value})
+	if tok, ret, ok := FlowInfo(r, testSigner); !ok || tok != "link:u_1" || ret != "/profile?x=1" {
+		t.Fatalf("FlowInfo = %q %q %v", tok, ret, ok)
+	}
+	if _, _, ok := FlowInfo(httptest.NewRequest("GET", "/", nil), testSigner); ok {
+		t.Fatal("FlowInfo without cookie")
 	}
 }
 

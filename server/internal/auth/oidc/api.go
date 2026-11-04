@@ -33,6 +33,23 @@ type Identity struct {
 	User   string // email, else preferred_username, else sub
 	Email  string
 	Groups []string
+
+	// Issuer and Subject identify the account (the key for linking).
+	Issuer  string
+	Subject string
+	// EmailVerified is the email_verified claim; EmailVerifiedPresent is
+	// false when the IdP did not send it.
+	EmailVerified        bool
+	EmailVerifiedPresent bool
+	// Name and PreferredUsername are profile claims (may be empty).
+	Name              string
+	PreferredUsername string
+}
+
+// EmailUsable reports whether the e-mail may be matched against
+// allow-lists: present and verified (or no claim at all, or allowUnverified).
+func (i Identity) EmailUsable(allowUnverified bool) bool {
+	return i.Email != "" && (!i.EmailVerifiedPresent || i.EmailVerified || allowUnverified)
 }
 
 // Signer signs and verifies small opaque values (the flow cookie). The

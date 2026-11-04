@@ -4,6 +4,8 @@
 package jackettfake
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,14 +143,25 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	case isAPIKeyPath(p):
 		if r.URL.Query().Get("apikey") != APIKey && r.URL.Query().Get("jackett_apikey") != APIKey {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = io.WriteString(w, `{"error":"bad apikey"}`)
+			send(w, r, http.StatusUnauthorized, "application/json", []byte(`{"error":"bad apikey"}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		// Like Jackett, every link carries the API key, and so does a header.
 		w.Header().Set("Set-Cookie", "evil=1; Path=/")
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": p})
+		w.Header().Set("X-Jackett-Link", "http://127.0.0.1:9117/dl/x/?jackett_apikey="+APIKey)
+		switch {
+		case strings.HasPrefix(p, "/dl/"):
+			send(w, r, http.StatusOK, "application/x-bittorrent", []byte(TorrentBody))
+		case strings.Contains(p, "/results/torznab"):
+			send(w, r, http.StatusOK, "application/rss+xml; charset=utf-8", []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:torznab="http://torznab.com/schemas/2015/feed"><channel><item><title>x</title>`+
+				`<link>http://127.0.0.1:9117/dl/rutor/?jackett_apikey=`+APIKey+`&amp;path=abc&amp;file=x</link>`+
+				`<torznab:attr name="magneturl" value="http://127.0.0.1:9117/dl/rutor/?jackett_apikey=`+APIKey+`"/></item></channel></rss>`))
+		default:
+			b, _ := json.Marshal(map[string]any{"ok": true, "path": p, "query": r.URL.RawQuery,
+				"Results": []map[string]any{{"Link": "http://127.0.0.1:9117/dl/rutor/?jackett_apikey=" + APIKey + "&path=abc", "Pad": strings.Repeat("r", 2048)}}})
+			send(w, r, http.StatusOK, "application/json", b)
+		}
 		return
 	}
 	if !f.authed(r) {
@@ -156,17 +170,40 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case p == "/api/v2.0/server/config":
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"app_version": Version, "api_key": APIKey})
+		b, _ := json.Marshal(map[string]any{"app_version": Version, "api_key": APIKey, "port": 9117, "blackholedir": "/x/" + APIKey})
+		send(w, r, http.StatusOK, "application/json", b)
 	case p == "/api/v2.0/big":
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"data":"`+strings.Repeat("x", 4096)+`"}`)
+		send(w, r, http.StatusOK, "application/json", []byte(`{"data":"`+strings.Repeat("x", 4096)+`"}`))
+	case p == "/api/v2.0/html":
+		send(w, r, http.StatusOK, "text/html", []byte(`<a href="/dl/a/?jackett_apikey=`+APIKey+`">x</a>`))
 	default:
-		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Set-Cookie", "Jackett=leaked; Path=/")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-		_ = json.NewEncoder(w).Encode(map[string]any{"path": p, "method": r.Method, "body": string(body)})
+		w.Header().Set("X-Jackett-Link", "http://127.0.0.1:9117/dl/x/?jackett_apikey="+APIKey)
+		b, _ := json.Marshal(map[string]any{"path": p, "method": r.Method, "body": string(body), "query": r.URL.RawQuery,
+			"link": "http://127.0.0.1:9117/dl/x/?jackett_apikey=" + APIKey})
+		send(w, r, http.StatusOK, "application/json", b)
 	}
+}
+
+// TorrentBody is what /dl/* returns (a fake torrent without the key).
+const TorrentBody = "d8:announce14:http://tracker4:infod4:name1:xee"
+
+// send writes body, gzip-compressed when the client accepts it (like
+// Jackett's response compression).
+func send(w http.ResponseWriter, r *http.Request, status int, ct string, body []byte) {
+	w.Header().Set("Content-Type", ct)
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write(body)
+		_ = zw.Close()
+		body = buf.Bytes()
+		w.Header().Set("Content-Encoding", "gzip")
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func isAPIKeyPath(p string) bool {

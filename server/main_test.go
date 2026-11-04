@@ -16,11 +16,15 @@ func TestAuthReset(t *testing.T) {
 	}
 	_ = st.Update(func(s *store.Settings) error {
 		s.AuthEpoch = 5
-		s.Auth.Mode = "sso"
-		s.Auth.PasswordHash = "$2a$12$x"
+		s.Auth.Methods = store.Methods{OIDC: true}
+		s.Auth.Disabled = true
 		s.Auth.AllowedEmails = []string{"a@b.c"}
+		s.Auth.AdminEmails = []string{"a@b.c"}
 		s.Auth.Providers.OIDC = store.Provider{Issuer: "https://idp", ClientID: "c", ClientSecret: "s", VerifiedHash: "h"}
 		s.Auth.Header.Name = "X-User"
+		s.Users = []store.User{{ID: "u_1", Username: "admin"}}
+		s.Tokens = []store.Token{{ID: "t_1", UserID: "u_1"}}
+		s.Invites = []store.Invite{{ID: "i_1"}}
 		s.PublicURL = "https://keep.me"
 		return nil
 	})
@@ -29,8 +33,9 @@ func TestAuthReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := st.Get()
-	if s.Auth.Mode != "" || s.Auth.PasswordHash != "" || s.Auth.Providers.OIDC.ClientID != "" || s.Auth.Providers.OIDC.VerifiedHash != "" || len(s.Auth.AllowedEmails) != 0 {
-		t.Fatalf("auth not reset: %+v", s.Auth)
+	if s.Auth.Methods != (store.Methods{Password: true}) || s.Auth.Disabled || s.Auth.Providers.OIDC.ClientID != "" ||
+		len(s.Auth.AllowedEmails) != 0 || len(s.Auth.AdminEmails) != 0 || len(s.Users) != 0 || len(s.Tokens) != 0 || len(s.Invites) != 0 {
+		t.Fatalf("auth not reset: %+v", s)
 	}
 	if string(s.SessionKey) == oldKey || s.AuthEpoch != 6 {
 		t.Fatal("session key not rotated / epoch not bumped")

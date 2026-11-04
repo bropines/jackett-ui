@@ -141,7 +141,8 @@ func TestHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Identity.Login != "octo-cat" || res.Identity.Email != "octo@example.com" || res.Identity.ID != 42 ||
-		res.Identity.User() != "octo@example.com" || res.ReturnPath != "/indexers" || res.TestToken != "tt" {
+		res.Identity.User() != "octo@example.com" || res.ReturnPath != "/indexers" || res.TestToken != "tt" ||
+		res.Identity.Subject() != "42" || Issuer != "https://github.com" {
 		t.Errorf("result: %+v", res)
 	}
 }

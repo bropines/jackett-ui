@@ -4,6 +4,10 @@
 // in the same directory, fsync, rename). Readers get deep copies, writers go
 // through Update, which serialises changes and only swaps the in-memory copy
 // after the file was written successfully.
+//
+// Format version 2 (docs/spec-v0.3-users.md) adds users, API tokens, invites
+// and independently switchable login methods. A version 1 file is migrated
+// on Open (see migrate.go); the original is kept as jackett-ui.json.v1.bak.
 package store
 
 import (
@@ -16,36 +20,104 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 )
 
 // FileName is the settings file name inside DATA_DIR.
 const FileName = "jackett-ui.json"
 
+// BackupV1Name is the copy of a version 1 file kept by the migration.
+const BackupV1Name = FileName + ".v1.bak"
+
 // CurrentVersion is the settings file format version.
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 // SessionKeySize is the size of the HMAC key for sessions.
 const SessionKeySize = 32
+
+// Roles.
+const (
+	RoleViewer = "viewer"
+	RoleEditor = "editor"
+	RoleAdmin  = "admin"
+)
 
 // Settings is the content of the settings file.
 type Settings struct {
 	Version    int    `json:"version"`
 	SessionKey []byte `json:"sessionKey"` // base64 in JSON
-	AuthEpoch  uint64 `json:"authEpoch"`
-	Auth       Auth   `json:"auth"`
+	// AuthEpoch ends everybody's sessions when bumped.
+	AuthEpoch uint64 `json:"authEpoch"`
+	Auth      Auth   `json:"auth"`
 	// PublicURL and SessionTTL are optional; env (PUBLIC_URL, SESSION_TTL) wins.
 	PublicURL  string `json:"publicUrl,omitempty"`
 	SessionTTL string `json:"sessionTtl,omitempty"`
+
+	Users   []User   `json:"users"`
+	Tokens  []Token  `json:"tokens"`
+	Invites []Invite `json:"invites"`
+}
+
+// Methods are the independently switchable login methods.
+type Methods struct {
+	Password bool `json:"password"`
+	OIDC     bool `json:"oidc"`
+	Google   bool `json:"google"`
+	GitHub   bool `json:"github"`
+	Header   bool `json:"header"`
+}
+
+// Get returns the switch for method id (password, oidc, google, github, header).
+func (m Methods) Get(id string) bool {
+	switch id {
+	case "password":
+		return m.Password
+	case "oidc":
+		return m.OIDC
+	case "google":
+		return m.Google
+	case "github":
+		return m.GitHub
+	case "header":
+		return m.Header
+	}
+	return false
+}
+
+// Ptr returns a pointer to the switch for method id, nil if unknown.
+func (m *Methods) Ptr(id string) *bool {
+	switch id {
+	case "password":
+		return &m.Password
+	case "oidc":
+		return &m.OIDC
+	case "google":
+		return &m.Google
+	case "github":
+		return &m.GitHub
+	case "header":
+		return &m.Header
+	}
+	return nil
+}
+
+// AutoProvision: create accounts for allow-listed external logins.
+type AutoProvision struct {
+	Enabled bool   `json:"enabled"`
+	Role    string `json:"role"`
 }
 
 // Auth holds the stored authentication settings.
 type Auth struct {
-	Mode             string `json:"mode,omitempty"`
-	PasswordHash     string `json:"passwordHash,omitempty"`
-	PasswordFallback *bool  `json:"passwordFallback,omitempty"`
+	Methods Methods `json:"methods"`
+	// Disabled: no login at all, everyone is an anonymous admin.
+	Disabled      bool          `json:"disabled"`
+	AutoProvision AutoProvision `json:"autoProvision"`
 	// AllowedEmails applies to every external provider; GitHubUsers to
-	// GitHub logins. Empty everywhere = external logins are refused.
+	// GitHub logins; they gate auto-provisioning. AdminEmails: auto-provisioned
+	// users with these (verified) e-mails become admins.
 	AllowedEmails []string  `json:"allowedEmails"`
+	AdminEmails   []string  `json:"adminEmails"`
 	GitHubUsers   []string  `json:"githubUsers"`
 	Providers     Providers `json:"providers"`
 	Header        Header    `json:"header"`
@@ -96,21 +168,116 @@ type Header struct {
 	Trusted []string `json:"trusted"`
 }
 
+// User is a panel account.
+type User struct {
+	ID       string `json:"id"`
+	Username string `json:"username"` // lower-case, unique
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	// PasswordHash is bcrypt; "" = no password. The user "admin" may get
+	// its password from AUTH_PASSWORD[_HASH] instead (never stored).
+	PasswordHash string     `json:"passwordHash,omitempty"`
+	Disabled     bool       `json:"disabled"`
+	Identities   []Identity `json:"identities"`
+	// Epoch is bumped on password change, role change, disable and
+	// "log out everywhere"; sessions carry it.
+	Epoch       uint64     `json:"epoch"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	LastLoginAt *time.Time `json:"lastLoginAt,omitempty"`
+}
+
+// Identity is an external account linked to a user. The key is
+// (Provider, Issuer, Subject).
+type Identity struct {
+	Provider string    `json:"provider"`
+	Issuer   string    `json:"issuer"`
+	Subject  string    `json:"subject"`
+	Label    string    `json:"label"`
+	LinkedAt time.Time `json:"linkedAt"`
+}
+
+// Token is a personal API token (stored hashed).
+type Token struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"userId"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	Hash       string     `json:"hash"` // sha256 hex of the token
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	LastUsedIP string     `json:"lastUsedIp,omitempty"`
+	ExpiresAt  *time.Time `json:"expiresAt"`
+}
+
+// Invite is a pending one-time invitation (token stored hashed).
+type Invite struct {
+	ID        string    `json:"id"`
+	Hash      string    `json:"hash"`
+	Role      string    `json:"role"`
+	Name      string    `json:"name"`
+	CreatedBy string    `json:"createdBy"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := *t
+	return &v
+}
+
 // Clone returns a deep copy.
 func (s Settings) Clone() Settings {
 	c := s
 	c.SessionKey = slices.Clone(s.SessionKey)
-	if s.Auth.PasswordFallback != nil {
-		v := *s.Auth.PasswordFallback
-		c.Auth.PasswordFallback = &v
-	}
 	c.Auth.AllowedEmails = slices.Clone(s.Auth.AllowedEmails)
+	c.Auth.AdminEmails = slices.Clone(s.Auth.AdminEmails)
 	c.Auth.GitHubUsers = slices.Clone(s.Auth.GitHubUsers)
 	c.Auth.Providers.OIDC.AllowedGroups = slices.Clone(s.Auth.Providers.OIDC.AllowedGroups)
 	c.Auth.Providers.Google.AllowedGroups = slices.Clone(s.Auth.Providers.Google.AllowedGroups)
 	c.Auth.Providers.GitHub.AllowedGroups = slices.Clone(s.Auth.Providers.GitHub.AllowedGroups)
 	c.Auth.Header.Trusted = slices.Clone(s.Auth.Header.Trusted)
+	if s.Users != nil {
+		c.Users = make([]User, len(s.Users))
+		for i, u := range s.Users {
+			u.Identities = slices.Clone(u.Identities)
+			u.LastLoginAt = cloneTime(u.LastLoginAt)
+			c.Users[i] = u
+		}
+	}
+	if s.Tokens != nil {
+		c.Tokens = make([]Token, len(s.Tokens))
+		for i, t := range s.Tokens {
+			t.LastUsedAt = cloneTime(t.LastUsedAt)
+			t.ExpiresAt = cloneTime(t.ExpiresAt)
+			c.Tokens[i] = t
+		}
+	}
+	c.Invites = slices.Clone(s.Invites)
 	return c
+}
+
+// User returns a pointer to the user with id, nil if none.
+func (s *Settings) User(id string) *User {
+	for i := range s.Users {
+		if s.Users[i].ID == id {
+			return &s.Users[i]
+		}
+	}
+	return nil
+}
+
+// Defaults returns the settings of a fresh installation (without a session key).
+func Defaults() Settings {
+	return Settings{
+		Version: CurrentVersion,
+		Auth: Auth{
+			Methods:       Methods{Password: true},
+			AutoProvision: AutoProvision{Enabled: true, Role: RoleViewer},
+		},
+	}
 }
 
 // Store is the settings file plus its in-memory copy.
@@ -120,10 +287,13 @@ type Store struct {
 	cur  Settings
 	// wmu serialises Update calls (fn + write) without blocking readers.
 	wmu sync.Mutex
+	// Migrated is the version the file was migrated from on Open (0 = none).
+	Migrated int
 }
 
 // Open loads DATA_DIR/jackett-ui.json, creating it (and a session key) when
-// missing. A file with broader permissions than 0600 is tightened.
+// missing and migrating an older format. A file with broader permissions
+// than 0600 is tightened.
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("store: empty data dir")
@@ -134,33 +304,55 @@ func Open(dir string) (*Store, error) {
 	st := &Store{path: filepath.Join(dir, FileName)}
 
 	data, err := os.ReadFile(st.path)
+	changed := false
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		st.cur = Settings{Version: CurrentVersion}
+		st.cur = Defaults()
+		changed = true
 	case err != nil:
 		return nil, fmt.Errorf("store: read %s: %w", st.path, err)
 	default:
-		if err := json.Unmarshal(data, &st.cur); err != nil {
+		var head struct {
+			Version int `json:"version"`
+		}
+		if err := json.Unmarshal(data, &head); err != nil {
 			return nil, fmt.Errorf("store: parse %s: %w", st.path, err)
 		}
-		if st.cur.Version > CurrentVersion {
-			return nil, fmt.Errorf("store: %s has version %d, this build supports %d", st.path, st.cur.Version, CurrentVersion)
+		switch {
+		case head.Version > CurrentVersion:
+			return nil, fmt.Errorf("store: %s has version %d, this build supports %d", st.path, head.Version, CurrentVersion)
+		case head.Version < 2:
+			cur, err := migrateV1(data, time.Now())
+			if err != nil {
+				return nil, fmt.Errorf("store: migrate %s: %w", st.path, err)
+			}
+			// Keep the original first: if the rewrite fails, the v1 file is
+			// still in place and the next start migrates again.
+			if err := WriteFileAtomic(filepath.Join(dir, BackupV1Name), data); err != nil {
+				return nil, err
+			}
+			st.cur = cur
+			st.Migrated = max(head.Version, 1)
+			changed = true
+		default:
+			if err := json.Unmarshal(data, &st.cur); err != nil {
+				return nil, fmt.Errorf("store: parse %s: %w", st.path, err)
+			}
 		}
 		if fi, err := os.Stat(st.path); err == nil && fi.Mode().Perm()&0o077 != 0 {
 			_ = os.Chmod(st.path, 0o600)
 		}
 	}
 
-	changed := errors.Is(err, fs.ErrNotExist)
-	if st.cur.Version == 0 {
-		st.cur.Version = CurrentVersion
-		changed = true
+	if st.cur.Auth.AutoProvision.Role == "" {
+		st.cur.Auth.AutoProvision.Role = RoleViewer
 	}
 	if len(st.cur.SessionKey) != SessionKeySize {
 		st.cur.SessionKey = NewSessionKey()
 		changed = true
 	}
 	if changed {
+		st.cur.Version = CurrentVersion
 		if err := st.write(st.cur); err != nil {
 			return nil, err
 		}

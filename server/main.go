@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bropines/jackett-ui/server/internal/auth"
 	"github.com/bropines/jackett-ui/server/internal/config"
 	"github.com/bropines/jackett-ui/server/internal/httpapi"
 	"github.com/bropines/jackett-ui/server/internal/jackett"
@@ -26,7 +25,7 @@ import (
 )
 
 // version is set with -ldflags "-X main.version=…".
-var version = "0.2.1"
+var version = "0.3.0"
 
 func main() {
 	// `jackett-ui healthcheck`: for Docker HEALTHCHECK in images without a shell or curl.
@@ -51,19 +50,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if st.Migrated > 0 {
+		log.Warn("settings file migrated to format 2 (users, roles, API tokens); the old file is kept",
+			"from", st.Migrated, "backup", store.BackupV1Name)
+	}
+	if env.AuthMode != "" {
+		log.Warn("AUTH_MODE is deprecated: use AUTH_METHODS (password,oidc,google,github,header) and AUTH_DISABLED", "AUTH_MODE", env.AuthMode)
+	}
 	if env.AuthReset {
 		if err := authReset(st); err != nil {
 			return err
 		}
-		log.Warn("AUTH_RESET: stored password and login providers removed, session key rotated, all sessions ended. " +
-			"Open the UI to set a new password, then REMOVE AUTH_RESET from the environment (it resets on every start)")
+		log.Warn("AUTH_RESET: all users, API tokens, invites and login providers removed, session key rotated. " +
+			"Open the UI to create the first admin, then REMOVE AUTH_RESET from the environment (it resets on every start)")
 	}
 
-	eff, err := config.Resolve(env, st.Get())
-	if err != nil {
+	if eff, err := config.Resolve(env, st.Get()); err != nil {
 		return err
-	}
-	if err := eff.Validate(); err != nil {
+	} else if err := eff.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
@@ -74,7 +78,7 @@ func run() error {
 
 	jc := jackett.New(env.JackettURL, env.JackettPassword, nil, log)
 	px := proxy.New(jc, nil, log)
-	srv := httpapi.New(httpapi.Options{
+	srv, err := httpapi.New(httpapi.Options{
 		Env:     env,
 		Store:   st,
 		Jackett: jc,
@@ -83,23 +87,29 @@ func run() error {
 		Version: version,
 		Log:     log,
 	})
+	if err != nil {
+		return err
+	}
+	eff, err := config.Resolve(env, st.Get())
+	if err != nil {
+		return err
+	}
 
 	log.Info("jackett-ui starting",
 		"version", version,
 		"listen", env.Listen,
 		"jackett", env.JackettURL.String(),
 		"dataDir", env.DataDir,
-		"mode", eff.Mode.Value,
+		"methods", fmt.Sprintf("%+v", eff.Methods.Value),
+		"users", eff.UserCount,
 		"static", staticSrc,
 		"fromEnv", env.Set, // names only, never values
 	)
 	switch {
+	case eff.Disabled.Value:
+		log.Warn("login is DISABLED: anyone who can reach this server controls Jackett")
 	case eff.SetupRequired():
-		log.Warn("no admin password set: open the UI to set one (Jackett stays unreachable until then)")
-	case eff.Mode.Value == auth.ModeNone:
-		log.Warn("auth mode is NONE: anyone who can reach this server controls Jackett")
-	case eff.Mode.Value == auth.ModeSSO && !eff.AllowListSet():
-		log.Warn("auth mode sso without any allow-list (AUTH_ALLOWED_EMAILS, GITHUB_USERS, OIDC_ALLOWED_GROUPS): external logins are refused")
+		log.Warn("no users yet: open the UI to create the first admin (Jackett stays unreachable until then)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -141,6 +151,7 @@ func run() error {
 		log.Warn("shutdown", "error", err)
 		_ = hs.Close()
 	}
+	srv.Flush()
 	return nil
 }
 
@@ -169,15 +180,18 @@ func healthcheck() int {
 	return 0
 }
 
-// authReset removes the stored credentials and providers, resets the mode
-// and rotates the session key. Header and other settings are kept.
+// authReset starts authentication over: all users, API tokens and invites
+// are removed (→ setup wizard), login methods reset to password, login
+// enabled, providers and allow-lists cleared, the session key rotated.
+// Header, public URL and session TTL are kept.
 func authReset(st *store.Store) error {
 	return st.Update(func(s *store.Settings) error {
-		s.Auth.Mode = ""
-		s.Auth.PasswordHash = ""
-		s.Auth.PasswordFallback = nil
+		s.Users, s.Tokens, s.Invites = nil, nil, nil
+		s.Auth.Methods = store.Methods{Password: true}
+		s.Auth.Disabled = false
 		s.Auth.Providers = store.Providers{}
 		s.Auth.AllowedEmails = nil
+		s.Auth.AdminEmails = nil
 		s.Auth.GitHubUsers = nil
 		s.SessionKey = store.NewSessionKey()
 		s.AuthEpoch++

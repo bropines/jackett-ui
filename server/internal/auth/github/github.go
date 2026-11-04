@@ -273,5 +273,11 @@ func (p *Provider) identity(ctx context.Context, token string) (Identity, error)
 	return id, nil
 }
 
+// Issuer is the identity issuer recorded for GitHub accounts.
+const Issuer = "https://github.com"
+
+// Subject is the stable account key: the numeric user id (logins can be renamed).
+func (i Identity) Subject() string { return strconv.FormatInt(i.ID, 10) }
+
 // String helps logging without leaking anything sensitive.
 func (i Identity) String() string { return i.Login + "#" + strconv.FormatInt(i.ID, 10) }

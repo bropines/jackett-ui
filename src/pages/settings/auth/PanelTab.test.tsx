@@ -5,15 +5,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, serverApi } from "@/api";
 import { TooltipProvider } from "@/components/ui/misc";
-import { AuthSettingsCard } from "@/pages/settings/auth/AuthSettingsCard";
-import { uiSettings, uiSettingsPassword } from "@/test/fixtures/auth";
+import { PanelTab } from "@/pages/settings/auth/PanelTab";
+import { uiSettings, uiSettingsLockedMethods, uiSettingsPassword } from "@/test/fixtures/auth";
 
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <AuthSettingsCard />
+        <PanelTab />
       </TooltipProvider>
     </QueryClientProvider>,
   );
@@ -23,17 +23,26 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("AuthSettingsCard", () => {
-  it("disables locked fields with the env var hint", async () => {
+describe("PanelTab", () => {
+  it("shows login methods as checkboxes and disables locked fields with the env var", async () => {
     vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettings());
     wrap();
-    const issuer = await screen.findByLabelText("Issuer");
-    expect(issuer).toBeDisabled();
+    expect(await screen.findByRole("checkbox", { name: /Пароль/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /OpenID Connect/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /GitHub/ })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /GitHub/ })).toBeEnabled(); // verified → can be turned on
+    expect(screen.getByRole("checkbox", { name: /Google/ })).toBeDisabled(); // not configured
+    expect(screen.getByLabelText("Issuer")).toBeDisabled();
     expect(screen.getByText("задано переменной окружения OIDC_ISSUER")).toBeInTheDocument();
     expect(screen.getByLabelText("Время жизни сеанса")).toBeDisabled();
-    expect(screen.getByLabelText("Название на кнопке")).toBeEnabled();
-    expect(screen.getAllByText("проверено").length).toBeGreaterThan(0);
     expect(screen.getByText("https://jackett.example.com/_ui/auth/github/callback")).toBeInTheDocument();
+  });
+
+  it("locks the whole methods block when AUTH_METHODS is set", async () => {
+    vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettingsLockedMethods());
+    wrap();
+    expect(await screen.findByRole("checkbox", { name: /Пароль/ })).toBeDisabled();
+    expect(screen.getByText("задано переменной окружения AUTH_METHODS")).toBeInTheDocument();
   });
 
   it("saves only the changed fields", async () => {
@@ -45,18 +54,25 @@ describe("AuthSettingsCard", () => {
     expect(screen.getByRole("button", { name: /Сохранить/ })).toBeDisabled();
     await user.clear(name);
     await user.type(name, "Keycloak");
+    await user.click(screen.getByRole("checkbox", { name: /GitHub/ }));
+    await user.type(screen.getByLabelText("E-mail администраторов"), "boss@example.com");
     await user.click(screen.getByRole("button", { name: /Сохранить/ }));
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
-    expect(put.mock.calls[0]![0]).toEqual({ auth: { providers: { oidc: { providerName: "Keycloak" } } } });
+    expect(put.mock.calls[0]![0]).toEqual({
+      auth: {
+        methods: { password: true, oidc: true, google: false, github: true, header: false },
+        adminEmails: ["boss@example.com"],
+        providers: { oidc: { providerName: "Keycloak" } },
+      },
+    });
   });
 
-  it("keeps SSO unavailable until a provider is verified", async () => {
+  it("keeps a provider method unavailable until the provider is verified", async () => {
     vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettingsPassword());
     wrap();
-    const sso = await screen.findByRole("radio", { name: /Внешний вход/ });
-    expect(sso).toBeDisabled();
-    expect(screen.getByText(/нажмите «Проверить вход»: так вы не потеряете доступ/)).toBeInTheDocument();
-    expect(screen.getByText("Внешний вход сейчас запрещён всем")).toBeInTheDocument();
+    const google = await screen.findByRole("checkbox", { name: /Google/ });
+    expect(google).toBeDisabled();
+    expect(screen.getAllByText(/нажмите «Проверить вход»: так вы не потеряете доступ/).length).toBeGreaterThan(0);
   });
 
   it("asks for confirmation before turning login off", async () => {
@@ -64,24 +80,25 @@ describe("AuthSettingsCard", () => {
     const put = vi.spyOn(serverApi, "putSettings").mockResolvedValue(undefined);
     const user = userEvent.setup();
     wrap();
-    await user.click(await screen.findByRole("radio", { name: /Без входа/ }));
+    await user.click(await screen.findByRole("switch", { name: /Отключить вход полностью/ }));
+    expect(screen.getByText("Вход будет отключён")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Сохранить/ }));
     expect(put).not.toHaveBeenCalled();
     await user.click(await screen.findByRole("button", { name: "Отключить вход" }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith({ auth: { mode: "none" }, confirm: true }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith({ auth: { disabled: true }, confirm: true }));
   });
 
-  it("shows server field errors inline", async () => {
+  it("shows server errors (would_lock_out) and field errors inline", async () => {
     vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettings());
-    const err = new ApiError(409, "Поле задано переменной окружения", { error: "locked" }, "locked");
-    err.field = "auth.providers.oidc.providerName";
-    vi.spyOn(serverApi, "putSettings").mockRejectedValue(err);
+    const lock = new ApiError(409, "После этого войти будет невозможно", { error: "would_lock_out" }, "would_lock_out");
+    lock.field = "auth.methods";
+    const put = vi.spyOn(serverApi, "putSettings").mockRejectedValue(lock);
     const user = userEvent.setup();
     wrap();
-    const name = await screen.findByLabelText("Название на кнопке");
-    await user.type(name, "!");
+    await user.click(await screen.findByRole("checkbox", { name: /Пароль/ }));
     await user.click(screen.getByRole("button", { name: /Сохранить/ }));
-    expect(await screen.findByText("Поле задано переменной окружения")).toBeInTheDocument();
+    await waitFor(() => expect(put).toHaveBeenCalled());
+    expect(await screen.findByText("После этого войти будет невозможно")).toBeInTheDocument();
   });
 
   it("tests a provider: opens the URL and polls until verified", async () => {
@@ -99,7 +116,7 @@ describe("AuthSettingsCard", () => {
     await waitFor(() => expect(test).toHaveBeenCalledWith("google", { clientId: "gid" }));
     expect(open).toHaveBeenCalled();
     await waitFor(() => expect(win.location.href).toBe("/_ui/auth/google/start?test=tok"));
-    expect(await screen.findByText("проверено")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Внешний вход/ })).toBeEnabled();
+    expect(await within(section).findByText("проверено")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Google/ })).toBeEnabled();
   });
 });

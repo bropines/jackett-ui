@@ -7,7 +7,8 @@
  * call means that session is gone, so the auth gate is told to re-check
  * /_ui/api/auth/state (see `onAuthRecheck`).
  *
- * Search/download endpoints use the API key instead (`apikey=`), see `searchUrl`.
+ * Search and downloads use the session too: the server injects Jackett's API key, which never
+ * reaches the browser (download links come back with `jackett_apikey=session`).
  */
 import { ApiError, errorFromResponse, isAuthProxyRedirect, maybeRecheck } from "@/api/http";
 import type {
@@ -23,7 +24,7 @@ import type {
 import { SERVER_CONFIG_READONLY } from "@/api/types";
 
 export * from "@/api/types";
-export { ApiError, emitAuthRecheck, errText, onAuthRecheck, type ServerErrorBody } from "@/api/http";
+export { ApiError, emitAuthRecheck, errText, isForbidden, onAuthRecheck, type ServerErrorBody } from "@/api/http";
 export * from "@/api/server";
 
 const BASE = "/api/v2.0";
@@ -61,16 +62,6 @@ const json = (method: string, body: unknown): RequestInit => ({
   body: JSON.stringify(body),
 });
 
-/* ── API key (needed for search / download / Torznab links) ─────────────── */
-
-let apiKey = "";
-export function setApiKey(key: string) {
-  apiKey = key;
-}
-export function getApiKey() {
-  return apiKey;
-}
-
 /* ── Endpoints ──────────────────────────────────────────────────────────── */
 
 export const api = {
@@ -91,16 +82,15 @@ export const api = {
   /** Runs a test query. 204 = OK; 500 with { error } on failure. */
   testIndexer: (id: string) => request<void>(`${BASE}/indexers/${encodeURIComponent(id)}/test`, { method: "POST" }, "none"),
 
-  serverConfig: async () => {
-    const cfg = await request<ServerConfig>(`${BASE}/server/config`);
-    if (cfg?.api_key) setApiKey(cfg.api_key);
-    return cfg;
-  },
+  /** Admin only. `api_key` comes back as "(hidden)": the UI never needs it. */
+  serverConfig: () => request<ServerConfig>(`${BASE}/server/config`),
 
   /** Note: changing proxy settings makes Jackett restart itself (a few seconds of 502/connection errors). */
   saveServerConfig: (cfg: ServerConfig | ServerConfigUpdate) => {
     const body: Record<string, unknown> = { ...cfg };
     for (const k of SERVER_CONFIG_READONLY) delete body[k];
+    // The server hides Jackett's key ("(hidden)"); never send it back.
+    delete body.api_key;
     return request<void>(`${BASE}/server/config`, json("POST", body), "none");
   },
 
@@ -114,9 +104,9 @@ export const api = {
     request<SearchResponse>(searchUrl(p, indexer), { signal }),
 };
 
-/** Builds the JSON search URL (same as Jackett's own UI). */
+/** Builds the JSON search URL (same as Jackett's own UI, but without `apikey`: the session authorizes it). */
 export function searchUrl(p: SearchParams, indexer = "all"): string {
-  const q = new URLSearchParams({ apikey: apiKey, Query: p.query });
+  const q = new URLSearchParams({ Query: p.query });
   p.trackers?.forEach((t) => q.append("Tracker[]", t));
   p.categories?.forEach((c) => q.append("Category[]", String(c)));
   q.append("_", String(Date.now()));
@@ -166,4 +156,13 @@ export const qk = {
   authState: ["auth-state"] as const,
   /** jackett-ui server: GET /_ui/api/settings */
   uiSettings: ["ui-settings"] as const,
+  /** GET /_ui/api/me (profile, own tokens). */
+  me: ["me"] as const,
+  /** GET /_ui/api/users (admin). */
+  users: ["users"] as const,
+  userTokens: (id: string) => ["users", id, "tokens"] as const,
+  /** GET /_ui/api/invites (admin). */
+  invites: ["invites"] as const,
+  /** GET /_ui/api/invites/{token} (public). */
+  publicInvite: (token: string) => ["public-invite", token] as const,
 };

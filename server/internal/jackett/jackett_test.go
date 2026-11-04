@@ -139,3 +139,31 @@ func TestStatusCached(t *testing.T) {
 		t.Fatal("status not cached")
 	}
 }
+
+func TestAPIKey(t *testing.T) {
+	f := jackettfake.New("adminpw")
+	defer f.Close()
+	c := client(t, f, "adminpw")
+	if c.KnownAPIKey() != "" {
+		t.Fatal("key before any probe")
+	}
+	k, err := c.APIKey(context.Background())
+	if err != nil || k != jackettfake.APIKey || c.KnownAPIKey() != k {
+		t.Fatalf("key %q err %v", k, err)
+	}
+	// Cached: no new probe.
+	n := len(f.Seen())
+	if k, _ := c.APIKey(context.Background()); k != jackettfake.APIKey || len(f.Seen()) != n {
+		t.Fatal("key not cached")
+	}
+	c.InvalidateAPIKey()
+	if _, err := c.APIKey(context.Background()); err != nil || len(f.Seen()) == n {
+		t.Fatal("invalidated key not re-read")
+	}
+	// Wrong password: no key, login error.
+	bad := client(t, f, "wrong")
+	bad.FailBackoff = 0
+	if _, err := bad.APIKey(context.Background()); !errors.Is(err, jackett.ErrLoginFailed) {
+		t.Fatalf("err %v", err)
+	}
+}

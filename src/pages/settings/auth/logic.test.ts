@@ -16,7 +16,7 @@ import {
   verifyKey,
   type AuthForm,
 } from "@/pages/settings/auth/logic";
-import { uiSettings, uiSettingsPassword } from "@/test/fixtures/auth";
+import { uiSettings, uiSettingsLockedMethods, uiSettingsPassword } from "@/test/fixtures/auth";
 
 const edit = (f: AuthForm, over: Partial<AuthForm>): AuthForm => ({ ...f, ...over });
 const editProvider = (f: AuthForm, id: keyof AuthForm["providers"], over: Partial<AuthForm["providers"]["oidc"]>): AuthForm => ({
@@ -27,7 +27,10 @@ const editProvider = (f: AuthForm, id: keyof AuthForm["providers"], over: Partia
 describe("toAuthForm", () => {
   it("maps settings to form values", () => {
     const f = toAuthForm(uiSettings());
-    expect(f.mode).toBe("sso");
+    expect(f.methods).toEqual({ password: true, oidc: true, google: false, github: false, header: false });
+    expect(f.disabled).toBe(false);
+    expect(f.autoProvision).toBe(true);
+    expect(f.defaultRole).toBe("viewer");
     expect(f.allowedEmails).toBe("me@example.com");
     expect(f.githubUsers).toBe("octocat");
     expect(f.providers.oidc).toMatchObject({ issuer: "https://auth.example.com/application/o/jackett/", clientId: "abc", providerName: "Authentik" });
@@ -78,18 +81,29 @@ describe("buildPatch", () => {
     expect(buildPatch(f, s)).toEqual({});
   });
 
-  it("adds confirm when switching to none", () => {
+  it("sends the whole methods object when one method changes", () => {
     const s = uiSettings();
-    expect(buildPatch(edit(toAuthForm(s), { mode: "none" }), s)).toEqual({ auth: { mode: "none" }, confirm: true });
+    const f = toAuthForm(s);
+    expect(buildPatch(edit(f, { methods: { ...f.methods, github: true } }), s)).toEqual({
+      auth: { methods: { password: true, oidc: true, google: false, github: true, header: false } },
+    });
   });
 
-  it("sends current + new password only when a password is typed", () => {
+  it("adds confirm when turning login off", () => {
     const s = uiSettings();
-    const f = edit(toAuthForm(s), { pwCurrent: "old-password", pwNew: "new-password", pwRepeat: "new-password" });
-    expect(buildPatch(f, s)).toEqual({ auth: { password: { current: "old-password", new: "new-password" } } });
-    const noPw = uiSettingsPassword();
-    noPw.auth.passwordSet.value = false;
-    expect(buildPatch(edit(toAuthForm(noPw), { pwNew: "new-password" }), noPw)).toEqual({ auth: { password: { new: "new-password" } } });
+    expect(buildPatch(edit(toAuthForm(s), { disabled: true }), s)).toEqual({ auth: { disabled: true }, confirm: true });
+  });
+
+  it("patches auto-provision and admin e-mails", () => {
+    const s = uiSettings();
+    const f = edit(toAuthForm(s), { autoProvision: false, defaultRole: "editor", adminEmails: "boss@example.com" });
+    expect(buildPatch(f, s)).toEqual({ auth: { autoProvision: { enabled: false, role: "editor" }, adminEmails: ["boss@example.com"] } });
+  });
+
+  it("never writes locked methods", () => {
+    const s = uiSettingsLockedMethods();
+    const f = toAuthForm(s);
+    expect(buildPatch(edit(f, { methods: { ...f.methods, password: false } }), s)).toEqual({});
   });
 });
 
@@ -105,14 +119,13 @@ describe("locks", () => {
     expect(lockedHint(s, P.provider("github", "clientId"))).toBe("задано переменной окружения GITHUB_CLIENT_ID");
     s.auth.githubUsers.locked = true;
     expect(lockedHint(s, P.githubUsers)).toBe("задано переменной окружения GITHUB_USERS");
-    s.auth.passwordSet.locked = true;
-    expect(lockedHint(s, P.passwordCurrent)).toContain("AUTH_PASSWORD");
+    expect(lockedHint(uiSettingsLockedMethods(), P.methods)).toBe("задано переменной окружения AUTH_METHODS");
+    expect(lockedHint(uiSettingsLockedMethods(), P.method("github"))).toBe("задано переменной окружения AUTH_METHODS");
   });
 
   it("maps server error paths to form paths", () => {
     expect(errorPath("auth.providers.google.clientSecretSet")).toBe("auth.providers.google.clientSecret");
-    expect(errorPath("auth.password.current")).toBe(P.passwordCurrent);
-    expect(errorPath("auth.password.new")).toBe(P.password);
+    expect(errorPath("auth.methods")).toBe(P.methods);
     expect(errorPath(undefined)).toBeUndefined();
   });
 });
@@ -137,26 +150,33 @@ describe("verification", () => {
 });
 
 describe("validateAuthForm", () => {
-  it("blocks switching to sso without a verified provider", () => {
+  it("blocks a provider method until the provider is configured and verified", () => {
     const s = uiSettingsPassword();
-    const f = edit(toAuthForm(s), { mode: "sso" });
-    expect(validateAuthForm(f, s, {})[P.mode]).toMatch(/Проверить вход/);
+    const f0 = toAuthForm(s);
+    const f = edit(f0, { methods: { ...f0.methods, google: true } });
+    expect(validateAuthForm(f, s, {})[P.method("google")]).toMatch(/Client ID/);
     const g = editProvider(f, "google", { clientId: "gid" });
-    expect(validateAuthForm(g, s, { google: verifyKey(g, "google") })[P.mode]).toBeUndefined();
+    expect(validateAuthForm(g, s, {})[P.method("google")]).toMatch(/Проверить вход/);
+    expect(validateAuthForm(g, s, { google: verifyKey(g, "google") })[P.method("google")]).toBeUndefined();
   });
 
-  it("checks passwords", () => {
-    const s = uiSettings();
-    const base = toAuthForm(s);
-    expect(validateAuthForm(edit(base, { pwNew: "short" }), s, {})[P.password]).toBe("Минимум 8 символов");
-    const e = validateAuthForm(edit(base, { pwNew: "long-enough", pwRepeat: "different!" }), s, {});
-    expect(e[P.passwordRepeat]).toBe("Пароли не совпадают");
-    expect(e[P.passwordCurrent]).toBe("Введите текущий пароль");
+  it("needs at least one method unless login is off", () => {
+    const s = uiSettingsPassword();
+    const f0 = toAuthForm(s);
+    const none = edit(f0, { methods: { ...f0.methods, password: false } });
+    expect(validateAuthForm(none, s, {})[P.methods]).toBe("Включите хотя бы один способ входа");
+    expect(validateAuthForm(edit(none, { disabled: true }), s, {})[P.methods]).toBeUndefined();
+  });
+
+  it("validates admin e-mails", () => {
+    const s = uiSettingsPassword();
+    expect(validateAuthForm(edit(toAuthForm(s), { adminEmails: "boss" }), s, {})[P.adminEmails]).toMatch(/e-mail/);
   });
 
   it("needs trusted CIDRs for header mode", () => {
     const s = uiSettingsPassword();
-    const f = edit(toAuthForm(s), { mode: "header" });
+    const f0 = toAuthForm(s);
+    const f = edit(f0, { methods: { ...f0.methods, header: true } });
     expect(validateAuthForm(f, s, {})[P.headerTrusted]).toBeTruthy();
     expect(validateAuthForm(edit(f, { headerTrusted: "10.0.0.0/8, fd00::/8" }), s, {})[P.headerTrusted]).toBeUndefined();
     expect(validateAuthForm(edit(f, { headerTrusted: "10.0.0.1" }), s, {})[P.headerTrusted]).toMatch(/CIDR/);

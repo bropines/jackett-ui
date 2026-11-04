@@ -96,10 +96,15 @@ func newHarness(t *testing.T, o harnessOpt) *harness {
 	jc := jackett.New(e.JackettURL, e.JackettPassword, nil, quietLog)
 	jc.FailBackoff = 0
 	jc.StatusTTL = 0
-	srv := New(Options{
+	srv, err := New(Options{
 		Env: e, Store: st, Jackett: jc, Proxy: proxy.New(jc, nil, quietLog), Static: staticFS(),
 		Version: "test", Log: quietLog, GoogleIssuer: o.google, GitHubEndpoints: o.github,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Many logins from one test IP: the limiter has its own test.
+	srv.limiter.PerMinute, srv.limiter.Burst = 1000, 1000
 	return &harness{t: t, srv: srv, store: st, jackett: jf, env: env, jar: map[string]string{}, remote: testRemote, host: testHost}
 }
 
@@ -186,7 +191,7 @@ func (h *harness) setup() {
 }
 
 func (h *harness) login(pw string, opts ...reqOpt) *httptest.ResponseRecorder {
-	return h.do("POST", "/_ui/api/auth/login", map[string]string{"password": pw}, opts...)
+	return h.loginAs("admin", pw, opts...)
 }
 
 func (h *harness) state() stateResponse {
@@ -288,7 +293,7 @@ func (idp *fakeIdP) authorize(t *testing.T, authURL, clientID, email string, mut
 	q := u.Query()
 	now := time.Now()
 	claims := map[string]any{
-		"iss": idp.srv.URL, "sub": "user-1", "aud": clientID, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+		"iss": idp.srv.URL, "sub": "sub-" + email, "aud": clientID, "iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(),
 		"nonce": q.Get("nonce"), "email": email, "email_verified": true, "groups": []string{"users"},
 	}
 	if mutate != nil {
@@ -358,3 +363,48 @@ func (f *fakeGitHub) authorize(t *testing.T, authURL string) string {
 }
 
 var _ = context.Background
+
+func (h *harness) loginAs(user, pw string, opts ...reqOpt) *httptest.ResponseRecorder {
+	return h.do("POST", "/_ui/api/auth/login", map[string]string{"username": user, "password": pw}, opts...)
+}
+
+// createUser (as an admin client) creates a user and returns its id.
+func (h *harness) createUser(username, role, pw string) string {
+	h.t.Helper()
+	body := map[string]string{"username": username, "role": role, "name": strings.ToUpper(username)}
+	if pw != "" {
+		body["password"] = pw
+	}
+	w := h.do("POST", "/_ui/api/users", body)
+	h.expect(w, http.StatusCreated)
+	return decode[userView](h.t, w).ID
+}
+
+// as returns a new client logged in as username/pw.
+func (h *harness) as(username, pw string) *harness {
+	h.t.Helper()
+	c := h.clone()
+	c.expect(c.loginAs(username, pw), http.StatusNoContent)
+	return c
+}
+
+// newToken creates an API token for the client's user.
+func (h *harness) newToken(name string) createdToken {
+	h.t.Helper()
+	w := h.do("POST", "/_ui/api/me/tokens", map[string]any{"name": name})
+	h.expect(w, http.StatusCreated)
+	return decode[createdToken](h.t, w)
+}
+
+// userByName reads a user from the store.
+func (h *harness) userByName(name string) store.User {
+	h.t.Helper()
+	st := h.store.Get()
+	for _, u := range st.Users {
+		if u.Username == name {
+			return u
+		}
+	}
+	h.t.Fatalf("no user %q", name)
+	return store.User{}
+}

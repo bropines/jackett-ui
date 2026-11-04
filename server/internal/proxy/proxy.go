@@ -9,14 +9,18 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +37,35 @@ type Options struct {
 	WithCookie bool
 	// Forwarded values (effective, only from trusted proxies).
 	Proto, Host, For string
+	// RawQuery, when non-nil, replaces the request's query string (the
+	// caller strips API-key parameters and injects Jackett's key).
+	RawQuery *string
+	// Rewrite scrubs Jackett's API key from the response (nil = off).
+	Rewrite *Rewrite
 }
+
+// Rewrite describes the response rewriting: every occurrence of Key in
+// header values and in text bodies is replaced with Replacement.
+type Rewrite struct {
+	Key         string
+	Replacement string
+	// HideConfigKey replaces the "api_key" member of a JSON object body
+	// with "(hidden)" (GET server/config).
+	HideConfigKey bool
+}
+
+// DefaultMaxRewrite caps bodies that are buffered for rewriting.
+const DefaultMaxRewrite = 64 << 20
+
+// HiddenKey is what server/config's api_key becomes.
+const HiddenKey = "(hidden)"
+
+// Errors from response rewriting (mapped to 502 by the error handler).
+var (
+	ErrTooLarge = errors.New("response_too_large")
+	errEncoding = errors.New("unsupported upstream content encoding")
+	errUpgrade  = errors.New("protocol upgrade not supported")
+)
 
 type ctxKey struct{}
 
@@ -45,6 +77,8 @@ type Proxy struct {
 
 	// MaxBody limits request bodies (like nginx client_max_body_size 4m).
 	MaxBody int64
+	// MaxRewrite caps response bodies buffered for rewriting.
+	MaxRewrite int64
 	// Timeout for normal requests; SearchTimeout for …/results paths.
 	Timeout       time.Duration
 	SearchTimeout time.Duration
@@ -66,7 +100,7 @@ func New(jc *jackett.Client, transport http.RoundTripper, log *slog.Logger) *Pro
 	if log == nil {
 		log = slog.Default()
 	}
-	p := &Proxy{jc: jc, log: log, MaxBody: 4 << 20, Timeout: 60 * time.Second, SearchTimeout: 180 * time.Second}
+	p := &Proxy{jc: jc, log: log, MaxBody: 4 << 20, MaxRewrite: DefaultMaxRewrite, Timeout: 60 * time.Second, SearchTimeout: 180 * time.Second}
 	base := jc.Base()
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -77,10 +111,21 @@ func New(jc *jackett.Client, transport http.RoundTripper, log *slog.Logger) *Pro
 			out.URL.Path = strings.TrimRight(base.Path, "/") + o.Path
 			out.URL.RawPath = ""
 			out.URL.RawQuery = pr.In.URL.RawQuery
+			if o.RawQuery != nil {
+				out.URL.RawQuery = *o.RawQuery
+			}
 			out.Host = o.Host
 			out.Header.Del("Cookie")
 			out.Header.Del("X-Real-Ip")
 			out.Header.Del("Forwarded")
+			out.Header.Del("X-Api-Key")
+			if o.Rewrite != nil {
+				// The whole body is needed to scrub the key: no ranges,
+				// and only encodings we can decode.
+				out.Header.Del("Range")
+				out.Header.Del("If-Range")
+				out.Header.Set("Accept-Encoding", "gzip")
+			}
 			if o.For != "" {
 				out.Header.Set("X-Forwarded-For", o.For)
 				out.Header.Set("X-Real-IP", lastIP(o.For))
@@ -98,6 +143,13 @@ func New(jc *jackett.Client, transport http.RoundTripper, log *slog.Logger) *Pro
 			// The front sets these for every response; don't send two.
 			for _, h := range []string{"X-Frame-Options", "X-Content-Type-Options", "Referrer-Policy", "Content-Security-Policy"} {
 				resp.Header.Del(h)
+			}
+			if resp.StatusCode == http.StatusSwitchingProtocols {
+				return errUpgrade
+			}
+			o, _ := resp.Request.Context().Value(ctxKey{}).(Options)
+			if o.Rewrite != nil {
+				return rewriteResponse(resp, o.Rewrite, p.MaxRewrite)
 			}
 			return nil
 		},
@@ -149,11 +201,109 @@ func (p *Proxy) Serve(w http.ResponseWriter, r *http.Request, o Options) {
 			r.Body = http.NoBody
 		}
 	}
+	// No protocol upgrades through the proxy (a tunnel can't be scrubbed).
+	r.Header.Del("Upgrade")
 	p.rp.ServeHTTP(w, r)
+}
+
+// passThroughType: binary bodies that are never rewritten.
+func passThroughType(ct string) bool {
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return mt == "application/x-bittorrent" || strings.HasPrefix(mt, "image/")
+}
+
+// rewriteResponse scrubs rw.Key from the response headers and (for
+// non-binary types) the body: gzip is decoded, the body is buffered up to
+// limit, the key replaced, and the result sent uncompressed (the front's
+// gzip middleware compresses again).
+func rewriteResponse(resp *http.Response, rw *Rewrite, limit int64) error {
+	if rw.Key == "" {
+		return errors.New("proxy: rewrite without a key")
+	}
+	key, repl := []byte(rw.Key), []byte(rw.Replacement)
+	for k, vs := range resp.Header {
+		for i, v := range vs {
+			if strings.Contains(v, rw.Key) {
+				vs[i] = strings.ReplaceAll(v, rw.Key, rw.Replacement)
+			}
+		}
+		resp.Header[k] = vs
+	}
+	if resp.Request != nil && resp.Request.Method == http.MethodHead ||
+		resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+		return nil
+	}
+	if passThroughType(resp.Header.Get("Content-Type")) {
+		return nil
+	}
+	var src io.Reader = resp.Body
+	switch ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); ce {
+	case "", "identity":
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			if errors.Is(err, io.EOF) { // empty body
+				src = bytes.NewReader(nil)
+				break
+			}
+			return fmt.Errorf("%w: bad gzip: %v", errEncoding, err)
+		}
+		defer zr.Close()
+		src = zr
+	default:
+		return fmt.Errorf("%w: %q", errEncoding, ce)
+	}
+	body, err := io.ReadAll(io.LimitReader(src, limit+1))
+	_ = resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > limit {
+		return ErrTooLarge
+	}
+	if rw.HideConfigKey {
+		body = hideConfigKey(body)
+	}
+	body = bytes.ReplaceAll(body, key, repl)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Md5")
+	resp.Header.Del("Etag")
+	resp.TransferEncoding = nil
+	return nil
+}
+
+// hideConfigKey sets "api_key" of a JSON object to HiddenKey; other bodies
+// are returned unchanged.
+func hideConfigKey(body []byte) []byte {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	if _, ok := m["api_key"]; !ok {
+		return body
+	}
+	m["api_key"] = json.RawMessage(strconv.Quote(HiddenKey))
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func (p *Proxy) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, ErrTooLarge):
+		p.log.Warn("jackett response too large to rewrite", "path", r.URL.Path)
+		WriteError(w, http.StatusBadGateway, "response_too_large", "Ответ Jackett слишком большой")
+	case errors.Is(err, errEncoding), errors.Is(err, errUpgrade):
+		p.log.Warn("jackett response refused", "path", r.URL.Path, "error", err)
+		WriteError(w, http.StatusBadGateway, "jackett_bad_response", "Jackett вернул ответ, который нельзя обработать")
 	case errors.Is(err, jackett.ErrLoginFailed):
 		WriteError(w, http.StatusBadGateway, "jackett_login_failed", "Jackett не принял пароль администратора (JACKETT_PASSWORD)")
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil && !errors.Is(r.Context().Err(), context.DeadlineExceeded):

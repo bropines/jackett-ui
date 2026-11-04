@@ -4,13 +4,14 @@ import { ListChecks, Loader2, Plus, Radar, Square } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { api, errText, getApiKey, qk, type IndexerSummary } from "@/api";
+import { api, errText, qk, type IndexerSummary } from "@/api";
 import { ConfirmDialog, EmptyState, ErrorState, PageHeader, toastError } from "@/components/common";
 import { SearchInput } from "@/components/data-table";
 import { IndexerConfigDialog } from "@/components/indexer-config/IndexerConfigDialog";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/misc";
+import { useCan } from "@/lib/auth-hooks";
 import { plural } from "@/lib/format";
 import { CatalogDialog } from "@/pages/indexers/CatalogDialog";
 import { IndexerRow } from "@/pages/indexers/IndexerRow";
@@ -35,18 +36,21 @@ export function IndexersPage() {
   const search = useSearch({ from: "/indexers" });
   const navigate = useNavigate({ from: "/indexers" });
   const qc = useQueryClient();
+  // Viewers see the configured list read-only; the server answers 403 to the rest anyway.
+  const canManage = useCan("editor");
+  const addOpen = canManage && search.add !== undefined;
+  const editId = canManage ? (search.edit ?? null) : null;
 
   // Configured list is tiny; the full catalog (~400 KB gzipped) loads only when it is needed:
   // catalog open, the empty-state quick picks, or editing an indexer that is not configured yet.
   const indexersQ = useQuery({ queryKey: qk.indexersConfigured, queryFn: api.configuredIndexers, staleTime: INDEXERS_STALE_MS });
   const configured = useMemo(() => indexersQ.data ?? [], [indexersQ.data]);
   const needCatalog =
-    search.add !== undefined ||
-    (indexersQ.isSuccess && configured.length === 0) ||
-    (search.edit !== undefined && indexersQ.isSuccess && !configured.some((x) => x.id === search.edit));
+    canManage &&
+    (addOpen ||
+      (indexersQ.isSuccess && configured.length === 0) ||
+      (editId !== null && indexersQ.isSuccess && !configured.some((x) => x.id === editId)));
   const catalogQ = useQuery({ queryKey: qk.indexersAll, queryFn: api.indexers, staleTime: INDEXERS_STALE_MS, enabled: needCatalog });
-  const configQ = useQuery({ queryKey: qk.serverConfig, queryFn: api.serverConfig, staleTime: INDEXERS_STALE_MS });
-  const apiKey = configQ.data?.api_key || getApiKey();
 
   const all = useMemo(() => catalogQ.data ?? configured, [catalogQ.data, configured]);
   const unconfigured = useMemo(() => (catalogQ.data ?? []).filter((x) => !x.configured), [catalogQ.data]);
@@ -129,7 +133,6 @@ export function IndexersPage() {
 
   /* ── Dialogs ── */
 
-  const editId = search.edit ?? null;
   const editing = editId ? all.find((x) => x.id === editId) : undefined;
 
   const openCatalog = () => setSearch({ add: "1", edit: undefined });
@@ -166,6 +169,7 @@ export function IndexersPage() {
           : "Трекеры, через которые ищет Jackett"
       }
       actions={
+        canManage && (
         <>
           {configured.length > 0 &&
             (testing ? (
@@ -180,11 +184,12 @@ export function IndexersPage() {
                 Проверить все
               </Button>
             ))}
-          <Button onClick={openCatalog} disabled={search.add !== undefined && catalogQ.isFetching}>
-            {search.add !== undefined && catalogQ.isFetching ? <Loader2 className="animate-spin" /> : <Plus />}
+          <Button onClick={openCatalog} disabled={addOpen && catalogQ.isFetching}>
+            {addOpen && catalogQ.isFetching ? <Loader2 className="animate-spin" /> : <Plus />}
             Добавить трекер
           </Button>
         </>
+        )
       }
     />
   );
@@ -203,6 +208,12 @@ export function IndexersPage() {
     );
   } else if (indexersQ.isError) {
     body = <ErrorState error={indexersQ.error} onRetry={() => void indexersQ.refetch()} />;
+  } else if (configured.length === 0 && !canManage) {
+    body = (
+      <Card className="shadow-none">
+        <EmptyState icon={Radar} title="Пока ни одного трекера" description="Трекеры добавляет администратор или редактор. Попросите их подключить нужные." />
+      </Card>
+    );
   } else if (configured.length === 0) {
     const picks = QUICK_PICKS.map((id) => unconfigured.find((x) => x.id === id)).filter((x): x is IndexerSummary => !!x);
     body = (
@@ -258,7 +269,7 @@ export function IndexersPage() {
                   key={ix.id}
                   ix={ix}
                   test={tests[ix.id]}
-                  apiKey={apiKey}
+                  canManage={canManage}
                   onTest={() => testOne(ix)}
                   onEdit={() => {
                     backToCatalog.current = false;
@@ -277,11 +288,11 @@ export function IndexersPage() {
   return (
     <div className="min-w-0">
       {header}
-      <QbitHelp apiKey={apiKey} />
+      <QbitHelp />
       {body}
 
       <CatalogDialog
-        open={search.add !== undefined && !!catalogQ.data}
+        open={addOpen && !!catalogQ.data}
         onOpenChange={(open) => (open ? openCatalog() : setSearch({ add: undefined }, true))}
         indexers={unconfigured}
         onPick={pick}

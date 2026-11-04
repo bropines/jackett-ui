@@ -3,7 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, ApiError, emitAuthRecheck, serverApi, type ServerConfig } from "@/api";
+import { api, ApiError, emitAuthRecheck, serverApi } from "@/api";
 import { AuthGate } from "@/components/layout/AuthGate";
 import { JackettGate } from "@/components/layout/JackettGate";
 import { TooltipProvider } from "@/components/ui/misc";
@@ -29,7 +29,7 @@ const App = () => (
 beforeEach(() => {
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
-  vi.spyOn(api, "serverConfig").mockResolvedValue({ api_key: "k", app_version: "v0.24" } as ServerConfig);
+  vi.spyOn(api, "serverConfig").mockRejectedValue(new Error("must not be called"));
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -49,10 +49,11 @@ describe("AuthGate", () => {
     wrap(<App />);
 
     expect(await screen.findByText(/Jackett будет доступен только после входа/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Имя пользователя")).toHaveValue("admin");
     const [pw, pw2] = [screen.getByLabelText("Пароль"), screen.getByLabelText("Ещё раз")] as HTMLInputElement[];
     await user.type(pw!, "short");
     await user.type(pw2!, "short");
-    await user.click(screen.getByRole("button", { name: /Сохранить и войти/ }));
+    await user.click(screen.getByRole("button", { name: /Создать и войти/ }));
     expect(screen.getByText("Минимум 8 символов")).toBeInTheDocument();
 
     await user.clear(pw!);
@@ -65,22 +66,26 @@ describe("AuthGate", () => {
     await user.clear(pw2!);
     await user.type(pw2!, "longenough1");
     vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
-    await user.click(screen.getByRole("button", { name: /Сохранить и войти/ }));
-    expect(setup).toHaveBeenCalledWith("longenough1");
+    await user.clear(screen.getByLabelText("Имя пользователя"));
+    await user.type(screen.getByLabelText("Имя пользователя"), "Boss");
+    await user.click(screen.getByRole("button", { name: /Создать и войти/ }));
+    expect(setup).toHaveBeenCalledWith({ username: "boss", password: "longenough1" });
     expect(await screen.findByText("APP")).toBeInTheDocument();
   });
 
   it("shows the password login and logs in", async () => {
     vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ authenticated: false, user: null }));
-    const login = vi.spyOn(serverApi, "login").mockRejectedValueOnce(new ApiError(401, "Неверный пароль", undefined, "invalid_credentials"));
+    const login = vi.spyOn(serverApi, "login").mockRejectedValueOnce(new ApiError(401, "x", undefined, "invalid_credentials"));
     const user = userEvent.setup();
     wrap(<App />);
 
     const pw = await screen.findByLabelText("Пароль");
     expect(screen.queryByRole("link", { name: /Войти через/ })).toBeNull();
+    await user.type(screen.getByLabelText("Имя пользователя"), "thero");
     await user.type(pw, "wrong");
     await user.click(screen.getByRole("button", { name: /^Войти$/ }));
-    expect(await screen.findByText("Неверный пароль")).toBeInTheDocument();
+    expect(await screen.findByText("Неверное имя пользователя или пароль")).toBeInTheDocument();
+    expect(login).toHaveBeenCalledWith({ username: "thero", password: "wrong" });
 
     login.mockResolvedValueOnce(undefined);
     vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
@@ -107,13 +112,16 @@ describe("AuthGate", () => {
     window.history.replaceState(null, "", "/indexers?add=1");
     vi.spyOn(serverApi, "authState").mockResolvedValue(
       authState({
-        mode: "sso",
         authenticated: false,
-        passwordLogin: false,
-        providers: [
-          { id: "oidc", name: "Authentik" },
-          { id: "github", name: "GitHub" },
-        ],
+        user: null,
+        methods: {
+          password: false,
+          providers: [
+            { id: "oidc", name: "Authentik" },
+            { id: "github", name: "GitHub" },
+          ],
+          header: false,
+        },
       }),
     );
     wrap(<App />);
@@ -121,12 +129,37 @@ describe("AuthGate", () => {
     expect(oidc).toHaveAttribute("href", "/_ui/auth/oidc/start?return=%2Findexers%3Fadd%3D1");
     expect(screen.getByRole("link", { name: /Войти через GitHub/ })).toHaveAttribute("href", "/_ui/auth/github/start?return=%2Findexers%3Fadd%3D1");
     expect(screen.queryByLabelText("Пароль")).toBeNull();
+    expect(screen.queryByLabelText("Имя пользователя")).toBeNull();
+  });
+
+  it("shows both the password form and provider buttons", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(
+      authState({ authenticated: false, user: null, methods: { password: true, providers: [{ id: "google", name: "Google" }], header: false } }),
+    );
+    wrap(<App />);
+    expect(await screen.findByRole("link", { name: /Войти через Google/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("Имя пользователя")).toBeInTheDocument();
+    expect(screen.getByText("или")).toBeInTheDocument();
+  });
+
+  it("explains header-only login", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(
+      authState({ authenticated: false, user: null, methods: { password: false, providers: [], header: true } }),
+    );
+    wrap(<App />);
+    expect(await screen.findByText(/прокси-сервер авторизации/)).toBeInTheDocument();
+  });
+
+  it("lets everyone in when login is disabled", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ disabled: true, authenticated: true, user: null }));
+    wrap(<App />);
+    expect(await screen.findByText("APP")).toBeInTheDocument();
   });
 
   it("shows authError from the URL and strips it", async () => {
     window.history.replaceState(null, "", "/?authError=user_not_allowed");
     vi.spyOn(serverApi, "authState").mockResolvedValue(
-      authState({ mode: "sso", authenticated: false, providers: [{ id: "google", name: "Google" }] }),
+      authState({ authenticated: false, user: null, methods: { password: false, providers: [{ id: "google", name: "Google" }], header: false } }),
     );
     wrap(<App />);
     expect(await screen.findByText(/вход запрещён/)).toBeInTheDocument();

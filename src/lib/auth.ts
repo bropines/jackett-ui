@@ -1,22 +1,42 @@
-import type { AuthMode, AuthState, ProviderId } from "@/api/server";
+import type { AuthState, ProviderId, Role } from "@/api/server";
 
 export const MIN_PASSWORD = 8;
 
 /** Default button names; the server sends the actual ones in `auth/state`. */
 export const PROVIDER_NAMES: Record<ProviderId, string> = { oidc: "SSO", google: "Google", github: "GitHub" };
 
-/** Short label of the login mode (menu, settings). */
-export function modeLabel(mode: AuthMode): string {
-  switch (mode) {
-    case "password":
-      return "Вход по паролю";
-    case "sso":
-      return "Внешний вход (SSO)";
-    case "header":
-      return "Заголовок от прокси";
-    case "none":
-      return "Без входа";
-  }
+/** Role names as shown in the UI. */
+export const ROLE_LABELS: Record<Role, string> = { admin: "Админ", editor: "Редактор", viewer: "Поиск" };
+
+/** What each role may do (one line, for selects and hints). */
+export const ROLE_HINTS: Record<Role, string> = {
+  viewer: "Поиск и скачивание, список трекеров, свои API-токены",
+  editor: "Плюс добавление и настройка трекеров, журнал",
+  admin: "Всё, включая настройки и пользователей",
+};
+
+const RANK: Record<Role, number> = { viewer: 0, editor: 1, admin: 2 };
+
+/** True when `role` is `min` or higher. */
+export function roleAtLeast(role: Role | null | undefined, min: Role): boolean {
+  return !!role && RANK[role] !== undefined && RANK[role] >= RANK[min];
+}
+
+/** Effective role of the current visitor: login off = anonymous admin. */
+export function currentRole(s: AuthState | undefined): Role | null {
+  if (!s) return null;
+  if (s.disabled) return "admin";
+  if (!s.authenticated) return null;
+  return s.user?.role ?? "viewer";
+}
+
+/** Username rule from the spec: [a-z0-9._-]{2,32}. */
+export const USERNAME_RE = /^[a-z0-9._-]{2,32}$/;
+
+export function usernameError(v: string): string | undefined {
+  if (!v.trim()) return "Укажите имя пользователя";
+  if (!USERNAME_RE.test(v.trim().toLowerCase())) return "2–32 символа: латиница, цифры, точка, дефис, подчёркивание";
+  return undefined;
 }
 
 /** Validates a new password + repeat. Returns a Russian error or undefined. */
@@ -40,6 +60,18 @@ const AUTH_ERRORS: Record<string, string> = {
   oidc_not_configured: "Вход через SSO не настроен.",
   not_configured: "Этот способ входа не настроен.",
   oidc_unavailable: "Провайдер входа недоступен.",
+  identity_in_use: "Этот аккаунт уже привязан к другому пользователю.",
+  link_session_mismatch: "Сеанс сменился во время привязки. Попробуйте ещё раз.",
+  not_logged_in: "Чтобы привязать аккаунт, сначала войдите.",
+  invite_not_found: "Приглашение не найдено.",
+  invite_expired: "Срок приглашения истёк.",
+  invite_used: "Приглашение уже использовано.",
+  invite_invalid: "Приглашение недействительно.",
+  user_disabled: "Этот пользователь отключён.",
+  // codes the server uses for the link flow
+  unauthorized: "Чтобы привязать аккаунт, сначала войдите.",
+  wrong_session: "Сеанс сменился во время привязки. Попробуйте ещё раз.",
+  provider_already_linked: "К вашей учётке уже привязан аккаунт этого провайдера. Сначала отвяжите старый.",
 };
 
 export function authErrorText(code: string): string {
@@ -73,7 +105,14 @@ export function isLoggedIn(s: AuthState | undefined): boolean {
   return !!s && !s.setupRequired && s.authenticated;
 }
 
-/** Logging out only makes sense with our own session (password / SSO). */
+/** Logging out only makes sense with our own session (login is on). */
 export function canLogout(s: AuthState | undefined): boolean {
-  return !!s && (s.mode === "password" || s.mode === "sso");
+  return !!s && !s.disabled && s.authenticated;
+}
+
+/** Display name of the current user. */
+export function displayName(s: AuthState | undefined): string {
+  if (!s) return "";
+  if (s.user) return s.user.name || s.user.username;
+  return s.disabled ? "гость" : "";
 }

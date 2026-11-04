@@ -5,8 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api, serverApi, type ServerConfig } from "@/api";
 import { TooltipProvider } from "@/components/ui/misc";
-import { SettingsPage } from "@/pages/SettingsPage";
-import { authState, uiSettings } from "@/test/fixtures/auth";
+import { JackettTab } from "@/pages/settings/JackettTab";
+import { authState } from "@/test/fixtures/auth";
 
 const cfg: ServerConfig = {
   notices: [],
@@ -51,15 +51,16 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("SettingsPage", () => {
+describe("JackettTab", () => {
   it("saves the whole config and blocks invalid input", async () => {
     vi.spyOn(api, "serverConfig").mockResolvedValue(cfg);
-    vi.spyOn(serverApi, "getSettings").mockResolvedValue(uiSettings());
     vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
     const save = vi.spyOn(api, "saveServerConfig").mockResolvedValue(undefined);
     const user = userEvent.setup();
-    wrap(<SettingsPage />);
+    wrap(<JackettTab />);
 
+    expect(await screen.findByText(/Настройки самого Jackett/)).toBeInTheDocument();
+    expect(screen.queryByText(cfg.api_key)).toBeNull();
     const fs = await screen.findByLabelText("Адрес", { selector: "#cfg-flaresolverrurl" });
     expect(screen.queryByRole("region", { name: "Несохранённые изменения" })).toBeNull();
 

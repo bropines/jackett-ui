@@ -1,35 +1,137 @@
 /**
- * Client for the jackett-ui server's own API (`/_ui/api/*`): authentication state,
- * login/setup/logout and the server settings. See docs/server-spec.md.
+ * Client for the jackett-ui server's own API (`/_ui/api/*`): authentication state, login/setup,
+ * the current user (profile, API tokens), users and invites (admin) and the server settings.
+ * See docs/server-spec.md and docs/spec-v0.3-users.md §5.
  */
 import { ApiError, errorFromResponse, isAuthProxyRedirect, maybeRecheck } from "@/api/http";
 
-export type AuthMode = "password" | "sso" | "header" | "none";
-
-export const AUTH_MODES: readonly AuthMode[] = ["password", "sso", "header", "none"];
-
-/** External login providers (Amendment 1): generic OIDC, Google, GitHub. */
+/** External login providers: generic OIDC, Google, GitHub. */
 export type ProviderId = "oidc" | "google" | "github";
 
 export const PROVIDER_IDS: readonly ProviderId[] = ["oidc", "google", "github"];
 
+/** Login methods toggled independently in `auth.methods`. */
+export type MethodId = "password" | ProviderId | "header";
+
+export const METHOD_IDS: readonly MethodId[] = ["password", "oidc", "google", "github", "header"];
+
+/** viewer = «Поиск», editor = «Редактор», admin = «Админ». */
+export type Role = "viewer" | "editor" | "admin";
+
+export const ROLES: readonly Role[] = ["viewer", "editor", "admin"];
+
+/** The logged-in user as `auth/state` and `/me` report it. */
+export interface AuthUser {
+  id: string;
+  username: string;
+  name: string;
+  role: Role;
+}
+
 /** `GET /_ui/api/auth/state` */
 export interface AuthState {
-  mode: AuthMode;
   setupRequired: boolean;
   authenticated: boolean;
-  user?: string | null;
-  passwordLogin: boolean;
-  /** Enabled and verified providers, one login button each. */
-  providers: { id: ProviderId; name: string }[];
+  /** Login is off: everyone is an anonymous admin. */
+  disabled: boolean;
+  user?: AuthUser | null;
+  methods: {
+    password: boolean;
+    /** Enabled and verified providers, one login button each. */
+    providers: { id: ProviderId; name: string }[];
+    header: boolean;
+  };
   jackett: { ok: boolean; version?: string; error?: string };
   version?: string;
 }
 
-/** A setting value plus whether it comes from an environment variable. */
+/** A linked external account. */
+export interface Identity {
+  provider: ProviderId;
+  label: string;
+  linkedAt?: string | null;
+}
+
+/** Personal API token (metadata only; the secret is shown once at creation). */
+export interface ApiToken {
+  id: string;
+  name: string;
+  /** First 8 chars, e.g. "jui_Ab3d". */
+  prefix: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  lastUsedIp?: string | null;
+  expiresAt?: string | null;
+}
+
+/** `POST /me/tokens` → the secret once plus the metadata. */
+export interface CreatedToken extends ApiToken {
+  token: string;
+}
+
+/** `GET /_ui/api/me` */
+export interface Me {
+  /** `passwordSet` (assumption): whether the user has a password; when false, no current password is asked. */
+  user: AuthUser & { passwordSet?: boolean };
+  identities: Identity[];
+  tokens: ApiToken[];
+}
+
+/** One entry of `GET /_ui/api/users` (admin). */
+export interface UserEntry extends AuthUser {
+  disabled: boolean;
+  identities: Identity[];
+  tokenCount: number;
+  lastLoginAt?: string | null;
+  createdAt?: string | null;
+  passwordSet?: boolean;
+}
+
+export interface UserCreate {
+  username: string;
+  name: string;
+  role: Role;
+  password?: string;
+}
+
+export interface UserPatch {
+  name?: string;
+  role?: Role;
+  disabled?: boolean;
+  password?: string;
+}
+
+/** `GET /_ui/api/invites` (admin): pending invites. */
+export interface Invite {
+  id: string;
+  name: string;
+  role: Role;
+  expiresAt: string;
+  createdAt?: string | null;
+  createdBy?: string | null;
+}
+
+/** `POST /_ui/api/invites` → the one-time URL (shown once). */
+export interface CreatedInvite extends Partial<Invite> {
+  url: string;
+}
+
+/**
+ * `GET /_ui/api/invites/{token}` (public). `methods` is normalized by `inviteMethods()`:
+ * the server may send method ids (`["password","oidc"]`), provider objects or the auth-state shape.
+ */
+export interface PublicInvite {
+  name: string;
+  role: Role;
+  expiresAt?: string | null;
+  methods?: unknown;
+}
+
+/** A setting value plus whether it comes from an environment variable (and which one). */
 export interface Locked<T> {
   value: T;
   locked: boolean;
+  env?: string;
 }
 
 /** Common part of every provider in `GET /_ui/api/settings`. */
@@ -53,11 +155,13 @@ export interface OidcProviderSettings extends ProviderSettingsBase {
 /** `GET /_ui/api/settings` */
 export interface UiSettings {
   auth: {
-    mode: Locked<AuthMode>;
-    passwordSet: Locked<boolean>;
-    passwordFallback: Locked<boolean>;
-    /** Any provider, verified emails only. */
+    methods: Record<MethodId, Locked<boolean>>;
+    disabled: Locked<boolean>;
+    autoProvision: { enabled: Locked<boolean>; role: Locked<Role> };
+    /** Any provider, verified emails only: who may be auto-provisioned. */
     allowedEmails: Locked<string[]>;
+    /** Auto-provisioned users with these e-mails become admins. */
+    adminEmails: Locked<string[]>;
     /** GitHub logins, case-insensitive. */
     githubUsers: Locked<string[]>;
     providers: {
@@ -90,17 +194,19 @@ export interface ProviderFields {
 /** `PUT /_ui/api/settings`: partial, omitted = unchanged. */
 export interface UiSettingsPatch {
   auth?: {
-    mode?: AuthMode;
-    passwordFallback?: boolean;
-    password?: { current?: string; new: string };
+    /** Always the complete object when any method changed. */
+    methods?: Record<MethodId, boolean>;
+    disabled?: boolean;
+    autoProvision?: { enabled?: boolean; role?: Role };
     allowedEmails?: string[];
+    adminEmails?: string[];
     githubUsers?: string[];
     providers?: Partial<Record<ProviderId, ProviderFields>>;
     header?: { name?: string; trusted?: string[] };
   };
   publicUrl?: string;
   sessionTtl?: string;
-  /** Required when switching to `none`. */
+  /** Required when turning login off (`auth.disabled: true`). */
   confirm?: boolean;
 }
 
@@ -138,6 +244,17 @@ async function call<T>(path: string, init: RequestInit = {}, opts: CallOptions =
 }
 
 const body = (method: string, data: unknown): RequestInit => ({ method, body: JSON.stringify(data) });
+const del: RequestInit = { method: "DELETE" };
+const post: RequestInit = { method: "POST" };
+const enc = encodeURIComponent;
+const protectedCall = <T>(path: string, init: RequestInit = {}) => call<T>(path, init, { recheck: true });
+
+/** Lists come as a bare array; `{<key>: [...]}` is accepted too. */
+function asList<T>(r: unknown, key: string): T[] {
+  if (Array.isArray(r)) return r as T[];
+  const v = r && typeof r === "object" ? (r as Record<string, unknown>)[key] : undefined;
+  return Array.isArray(v) ? (v as T[]) : [];
+}
 
 /** Extracts the test token from the URL returned by `testProvider` (`…?test=<token>`). */
 export function providerTestToken(url: string): string | null {
@@ -151,35 +268,106 @@ export function providerTestToken(url: string): string | null {
 export const serverApi = {
   authState: () => call<AuthState>("/auth/state"),
 
-  /** First start: sets the admin password and logs in (204 + cookie). */
-  setup: (password: string) => call<void>("/auth/setup", body("POST", { password })),
+  /** First start: creates the first admin and logs in (204 + cookie). */
+  setup: (data: { username?: string; password: string }) => call<void>("/auth/setup", body("POST", data)),
 
-  login: (password: string) => call<void>("/auth/login", body("POST", { password })),
+  login: (data: { username: string; password: string }) => call<void>("/auth/login", body("POST", data)),
 
-  logout: () => call<void>("/auth/logout", { method: "POST" }),
+  logout: () => call<void>("/auth/logout", post),
 
-  /** Ends every session (bumps the auth epoch), including this one. */
-  logoutAll: () => call<void>("/auth/logout-all", { method: "POST" }),
+  /** Ends every session of the current user (bumps the user's epoch), including this one. */
+  logoutAll: () => call<void>("/auth/logout-all", post),
 
-  getSettings: () => call<UiSettings>("/settings", {}, { recheck: true }),
+  /* ── Me ── */
 
-  putSettings: (patch: UiSettingsPatch) => call<UiSettings | undefined>("/settings", body("PUT", patch), { recheck: true }),
+  me: () => protectedCall<Me>("/me"),
+  updateMe: (patch: { name?: string }) => protectedCall<void>("/me", body("PATCH", patch)),
+  changeMyPassword: (data: { current?: string; new: string }) => protectedCall<void>("/me/password", body("POST", data)),
+  unlinkMyIdentity: (provider: ProviderId) => protectedCall<void>(`/me/identities/${enc(provider)}`, del),
+  createMyToken: (data: { name: string; expiresInDays?: number }) => protectedCall<CreatedToken>("/me/tokens", body("POST", data)),
+  deleteMyToken: (id: string) => protectedCall<void>(`/me/tokens/${enc(id)}`, del),
+
+  /* ── Users (admin) ── */
+
+  users: async () => asList<UserEntry>(await protectedCall<unknown>("/users"), "users"),
+  createUser: (data: UserCreate) => protectedCall<UserEntry | undefined>("/users", body("POST", data)),
+  updateUser: (id: string, patch: UserPatch) => protectedCall<UserEntry | undefined>(`/users/${enc(id)}`, body("PATCH", patch)),
+  deleteUser: (id: string) => protectedCall<void>(`/users/${enc(id)}`, del),
+  logoutUser: (id: string) => protectedCall<void>(`/users/${enc(id)}/logout`, post),
+  unlinkUserIdentity: (id: string, provider: ProviderId) => protectedCall<void>(`/users/${enc(id)}/identities/${enc(provider)}`, del),
+  userTokens: async (id: string) => asList<ApiToken>(await protectedCall<unknown>(`/users/${enc(id)}/tokens`), "tokens"),
+  /** Revokes any user's token (admin). */
+  deleteToken: (id: string) => protectedCall<void>(`/tokens/${enc(id)}`, del),
+
+  /* ── Invites ── */
+
+  invites: async () => asList<Invite>(await protectedCall<unknown>("/invites"), "invites"),
+  createInvite: (data: { name: string; role: Role; expiresInDays: number }) => protectedCall<CreatedInvite>("/invites", body("POST", data)),
+  deleteInvite: (id: string) => protectedCall<void>(`/invites/${enc(id)}`, del),
+  /** Public: 404 = unknown, 410 = expired / used. */
+  invite: (token: string) => call<PublicInvite>(`/invites/${enc(token)}`),
+  /** Public: creates the user, consumes the invite and logs in (204 + cookie). */
+  acceptInvite: (token: string, data: { username: string; password: string }) => call<void>(`/invites/${enc(token)}/accept`, body("POST", data)),
+
+  /* ── Settings (admin) ── */
+
+  getSettings: () => protectedCall<UiSettings>("/settings"),
+
+  putSettings: (patch: UiSettingsPatch) => protectedCall<UiSettings | undefined>("/settings", body("PUT", patch)),
 
   /**
    * Checks the provider settings (OIDC discovery for oidc/google) and returns the URL that starts
    * a test login (open it in a new tab). Unsaved fields can be tested; an empty secret = the stored one.
    */
-  testProvider: (id: ProviderId, fields: ProviderFields) =>
-    call<{ url: string }>(`/settings/providers/${id}/test`, body("POST", fields), { recheck: true }),
+  testProvider: (id: ProviderId, fields: ProviderFields) => protectedCall<{ url: string }>(`/settings/providers/${id}/test`, body("POST", fields)),
 
-  testProviderResult: (id: ProviderId, token: string) =>
-    call<ProviderTestResult>(`/settings/providers/${id}/test/${encodeURIComponent(token)}`, {}, { recheck: true }),
+  testProviderResult: (id: ProviderId, token: string) => protectedCall<ProviderTestResult>(`/settings/providers/${id}/test/${enc(token)}`),
 };
+
+const safeReturn = (path: string) => (path.startsWith("/") && !path.startsWith("//") ? path : "/");
 
 /** Full-page URL that starts the login with `provider` and comes back to `returnPath`. */
 export function providerStartUrl(provider: ProviderId, returnPath: string): string {
-  const safe = returnPath.startsWith("/") && !returnPath.startsWith("//") ? returnPath : "/";
-  return `/_ui/auth/${provider}/start?return=${encodeURIComponent(safe)}`;
+  return `/_ui/auth/${provider}/start?return=${enc(safeReturn(returnPath))}`;
+}
+
+/** Full-page URL that links `provider` to the logged-in user and comes back to `returnPath` (default /profile). */
+export function providerLinkUrl(provider: ProviderId, returnPath = "/profile"): string {
+  return `/_ui/auth/${provider}/start?link=1&return=${enc(safeReturn(returnPath))}`;
+}
+
+/** Full-page URL that accepts invite `token` by logging in with `provider`. */
+export function providerInviteUrl(provider: ProviderId, token: string): string {
+  return `/_ui/auth/${provider}/start?invite=${enc(token)}`;
+}
+
+const DEFAULT_PROVIDER_NAMES: Record<ProviderId, string> = { oidc: "SSO", google: "Google", github: "GitHub" };
+const isProviderId = (v: unknown): v is ProviderId => typeof v === "string" && (PROVIDER_IDS as readonly string[]).includes(v);
+
+/**
+ * Normalizes `methods` of a public invite: `["password","oidc"]`, `[{id,name}]` or
+ * `{password, providers:[{id,name}]}` → `{password, providers}`.
+ */
+export function inviteMethods(raw: unknown): { password: boolean; providers: { id: ProviderId; name: string }[] } {
+  const out = { password: false, providers: [] as { id: ProviderId; name: string }[] };
+  const addProvider = (v: unknown) => {
+    if (isProviderId(v)) out.providers.push({ id: v, name: DEFAULT_PROVIDER_NAMES[v] });
+    else if (v && typeof v === "object" && isProviderId((v as { id?: unknown }).id)) {
+      const p = v as { id: ProviderId; name?: unknown };
+      out.providers.push({ id: p.id, name: typeof p.name === "string" && p.name ? p.name : DEFAULT_PROVIDER_NAMES[p.id] });
+    }
+  };
+  if (Array.isArray(raw)) {
+    for (const m of raw) {
+      if (m === "password" || (m && typeof m === "object" && (m as { id?: unknown }).id === "password")) out.password = true;
+      else addProvider(m);
+    }
+  } else if (raw && typeof raw === "object") {
+    const o = raw as { password?: unknown; providers?: unknown };
+    out.password = o.password === true;
+    if (Array.isArray(o.providers)) o.providers.forEach(addProvider);
+  }
+  return out;
 }
 
 export type ProviderTestOutcome = "verified" | "failed" | "timeout" | "cancelled";

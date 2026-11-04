@@ -1,9 +1,11 @@
 // Package httpapi is the HTTP front of jackett-ui: routing, authentication,
-// CSRF, security headers, gzip, the /_ui/api endpoints, the external login
-// flows, the Jackett proxy routes and the static UI.
+// authorization (roles, API tokens), CSRF, security headers, gzip, the
+// /_ui/api endpoints, the external login flows, the Jackett proxy routes
+// and the static UI.
 package httpapi
 
 import (
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/bropines/jackett-ui/server/internal/proxy"
 	"github.com/bropines/jackett-ui/server/internal/session"
 	"github.com/bropines/jackett-ui/server/internal/store"
+	"github.com/bropines/jackett-ui/server/internal/users"
 )
 
 // Options configure a Server.
@@ -68,12 +71,14 @@ type Server struct {
 	provCache map[string]*provEntry
 
 	tests *testFlows
+	usage *tokenUsage
 
 	handler http.Handler
 }
 
-// New builds the server.
-func New(o Options) *Server {
+// New builds the server. If AUTH_PASSWORD[_HASH] is set, it makes sure the
+// user "admin" exists (the env password is its password).
+func New(o Options) (*Server, error) {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
@@ -85,6 +90,9 @@ func New(o Options) *Server {
 	}
 	if o.GoogleIssuer == "" {
 		o.GoogleIssuer = config.GoogleIssuer
+	}
+	if err := ensureEnvAdmin(o.Env, o.Store, o.Now()); err != nil {
+		return nil, err
 	}
 	key := o.Store.Get().SessionKey
 	s := &Server{
@@ -104,6 +112,7 @@ func New(o Options) *Server {
 		githubEndpoints: o.GitHubEndpoints,
 		provCache:       map[string]*provEntry{},
 		tests:           newTestFlows(),
+		usage:           newTokenUsage(),
 	}
 	s.sessions.Now = o.Now
 	s.limiter.Now = o.Now
@@ -113,20 +122,56 @@ func New(o Options) *Server {
 		config.ProviderGitHub: s.githubFactory,
 	}
 	s.handler = requestLog(s.log, http.HandlerFunc(s.serve))
-	return s
+	return s, nil
+}
+
+// ensureEnvAdmin creates the user "admin" (role admin, no stored password)
+// when AUTH_PASSWORD[_HASH] is set and the user is missing.
+func ensureEnvAdmin(env *config.Env, st *store.Store, now time.Time) error {
+	if env.PasswordHash == "" {
+		return nil
+	}
+	cur := st.Get()
+	if users.ByUsername(&cur, store.AdminUsername) != nil {
+		return nil
+	}
+	return st.Update(func(s *store.Settings) error {
+		if users.ByUsername(s, store.AdminUsername) != nil {
+			return nil
+		}
+		s.Users = append(s.Users, newUser(store.AdminUsername, "Администратор", store.RoleAdmin, "", now))
+		return nil
+	})
+}
+
+func newUser(username, name, role, hash string, now time.Time) store.User {
+	return store.User{
+		ID: store.NewID("u_"), Username: username, Name: name, Role: role, PasswordHash: hash,
+		Identities: []store.Identity{}, Epoch: 1, CreatedAt: now.UTC().Truncate(time.Second),
+	}
 }
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
 
-// reqEnv is the per-request view of the configuration.
+// Flush persists pending token usage (call on shutdown).
+func (s *Server) Flush() { s.flushUsage(true) }
+
+// reqEnv is the per-request view of the configuration: one snapshot of the
+// stored settings and the effective configuration derived from it.
 type reqEnv struct {
+	st  store.Settings
 	eff config.Effective
 	rv  netutil.Resolver
 }
 
-func (s *Server) effective() (config.Effective, error) {
-	return config.Resolve(s.env, s.store.Get())
+func (s *Server) newReqEnv() (*reqEnv, error) {
+	st := s.store.Get()
+	eff, err := config.Resolve(s.env, st)
+	if err != nil {
+		return nil, err
+	}
+	return &reqEnv{st: st, eff: eff, rv: s.resolver(eff)}, nil
 }
 
 func (s *Server) resolver(eff config.Effective) netutil.Resolver {
@@ -134,15 +179,14 @@ func (s *Server) resolver(eff config.Effective) netutil.Resolver {
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	eff, err := s.effective()
+	re, err := s.newReqEnv()
 	if err != nil {
 		s.log.Error("invalid settings", "error", err)
 		setSecurityHeaders(w.Header(), "")
 		writeErr(w, http.StatusInternalServerError, "invalid_settings", "Ошибка в файле настроек: "+err.Error())
 		return
 	}
-	setSecurityHeaders(w.Header(), cspExtra(eff))
-	re := &reqEnv{eff: eff, rv: s.resolver(eff)}
+	setSecurityHeaders(w.Header(), cspExtra(re.eff))
 	gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.route(w, r, re)
 	})).ServeHTTP(w, r)
@@ -195,37 +239,6 @@ func isJackettPath(lp string) bool {
 	return false
 }
 
-// isAPIKeyRoute: Jackett routes that authenticate with the API key:
-// /api/v2.0/indexers/{id}/results[/...], /dl/*, /bh/*.
-func isAPIKeyRoute(lp string) bool {
-	if strings.HasPrefix(lp, "/dl/") || strings.HasPrefix(lp, "/bh/") {
-		return true
-	}
-	const pre = "/api/v2.0/indexers/"
-	if !strings.HasPrefix(lp, pre) {
-		return false
-	}
-	rest := lp[len(pre):]
-	id, tail, ok := strings.Cut(rest, "/")
-	if !ok || id == "" {
-		return false
-	}
-	return tail == "results" || strings.HasPrefix(tail, "results/")
-}
-
-func hasAPIKey(r *http.Request) bool {
-	for k, vs := range r.URL.Query() {
-		if strings.EqualFold(k, "apikey") || strings.EqualFold(k, "jackett_apikey") {
-			for _, v := range vs {
-				if strings.TrimSpace(v) != "" {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 func badPath(p string) bool {
 	for _, c := range p {
 		if c < 0x20 || c == 0x7f || c == '\\' {
@@ -252,153 +265,56 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request, re *reqEnv) {
 	}
 }
 
-// ---- authentication ----
-
-const (
-	failUnauthorized  = "unauthorized"
-	failSetupRequired = "setup_required"
-)
-
-// authenticate returns the caller's identity, or a failure code. Valid
-// sessions past half their lifetime are renewed (sliding).
-func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, re *reqEnv) (auth.Identity, string) {
-	eff := re.eff
-	if eff.SetupRequired() {
-		return auth.Identity{}, failSetupRequired
-	}
-	switch eff.Mode.Value {
-	case auth.ModeNone:
-		id, _ := auth.None{}.Authenticate(r)
-		return id, ""
-	case auth.ModeHeader:
-		h := auth.Header{Name: eff.HeaderName.Value, Trusted: eff.HeaderPrefixes}
-		if id, ok := h.Authenticate(r); ok {
-			return id, ""
-		}
-		return auth.Identity{}, failUnauthorized
-	}
-	c, err := r.Cookie(session.CookieName)
-	if err != nil || c.Value == "" {
-		return auth.Identity{}, failUnauthorized
-	}
-	sess, ok := s.sessions.Decode(c.Value, eff.Mode.Value, eff.Epoch)
-	if !ok {
-		return auth.Identity{}, failUnauthorized
-	}
-	ttl := eff.SessionTTL.Value
-	if w != nil && s.sessions.NeedsRenewal(sess, ttl) {
-		http.SetCookie(w, s.sessions.Cookie(s.sessions.New(sess.User, sess.Mode, sess.Epoch, ttl), re.rv.Secure(r)))
-	}
-	return auth.Identity{User: sess.User, Mode: sess.Mode, FromSession: true}, ""
-}
-
-func writeAuthFail(w http.ResponseWriter, code string) {
-	if code == failSetupRequired {
-		writeErr(w, http.StatusUnauthorized, failSetupRequired, "Сначала задайте пароль администратора")
-		return
-	}
-	writeErr(w, http.StatusUnauthorized, failUnauthorized, "Нужно войти")
-}
-
 func writeCSRF(w http.ResponseWriter) {
 	writeErr(w, http.StatusForbidden, "csrf", "Запрос отклонён (защита от CSRF)")
 }
 
-// issueSession sets a fresh session cookie.
-func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, re *reqEnv, user, mode string, epoch uint64) {
-	sess := s.sessions.New(user, mode, epoch, re.eff.SessionTTL.Value)
-	http.SetCookie(w, s.sessions.Cookie(sess, re.rv.Secure(r)))
+func writeForbidden(w http.ResponseWriter) {
+	writeErr(w, http.StatusForbidden, "forbidden", "Недостаточно прав")
 }
-
-func (s *Server) clearSession(w http.ResponseWriter, r *http.Request, re *reqEnv) {
-	http.SetCookie(w, session.ClearCookie(re.rv.Secure(r)))
-}
-
-// ---- Jackett routes ----
-
-func (s *Server) jackettRoute(w http.ResponseWriter, r *http.Request, p, lp string, re *reqEnv) {
-	if badPath(p) {
-		writeErr(w, http.StatusBadRequest, "bad_path", "Некорректный путь")
-		return
-	}
-	switch strings.TrimSuffix(lp, "/") {
-	case "/ui/dashboard", "/ui/login":
-		// Jackett's own login pages would bypass our auth.
-		writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
-		return
-	case "/ui/logout":
-		s.clearSession(w, r, re)
-		http.Redirect(w, r, "/", http.StatusFound)
-		return
-	}
-	// Secure by default: Jackett is unreachable until setup is done, also
-	// for API-key routes.
-	if re.eff.SetupRequired() {
-		writeAuthFail(w, failSetupRequired)
-		return
-	}
-	opts := proxy.Options{Path: p, Proto: re.rv.Scheme(r), Host: re.rv.Host(r), For: re.rv.ForwardedFor(r)}
-	if isAPIKeyRoute(lp) {
-		// Jackett checks the key itself. Never attach our Jackett cookie.
-		// No CSRF check: no ambient credentials are forwarded.
-		if !hasAPIKey(r) {
-			if _, fail := s.authenticate(w, r, re); fail != "" {
-				writeAuthFail(w, fail)
-				return
-			}
-		}
-		opts.WithCookie = false
-		s.proxy.Serve(w, r, opts)
-		return
-	}
-	if _, fail := s.authenticate(w, r, re); fail != "" {
-		writeAuthFail(w, fail)
-		return
-	}
-	if !csrfOK(r, re.rv) {
-		writeCSRF(w)
-		return
-	}
-	opts.WithCookie = true
-	s.proxy.Serve(w, r, opts)
-}
-
-// ---- /_ui routes ----
 
 func methodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
 	writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "Метод не поддерживается")
 }
 
-func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *reqEnv) {
-	// Public endpoints.
-	switch p {
-	case "/_ui/api/auth/state":
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			methodNotAllowed(w, "GET")
-			return
-		}
-		s.handleState(w, r, re)
-		return
-	case "/_ui/api/auth/setup", "/_ui/api/auth/login", "/_ui/api/auth/logout":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, "POST")
-			return
-		}
-		if !csrfOK(r, re.rv) {
-			writeCSRF(w)
-			return
-		}
-		switch p {
-		case "/_ui/api/auth/setup":
-			s.handleSetup(w, r, re)
-		case "/_ui/api/auth/login":
-			s.handleLogin(w, r, re)
-		default:
-			s.handleLogout(w, r, re)
-		}
+func notFound(w http.ResponseWriter) {
+	writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
+}
+
+// ---- /_ui routes ----
+
+// route table entry: method → handler.
+type handlers map[string]func()
+
+func dispatch(w http.ResponseWriter, r *http.Request, h handlers) {
+	m := r.Method
+	if m == http.MethodHead {
+		m = http.MethodGet
+	}
+	if f, ok := h[m]; ok {
+		f()
 		return
 	}
+	var allow []string
+	for k := range h {
+		allow = append(allow, k)
+	}
+	methodNotAllowed(w, strings.Join(sortStrings(allow), ", "))
+}
+
+func sortStrings(l []string) []string {
+	for i := range l {
+		for j := i + 1; j < len(l); j++ {
+			if l[j] < l[i] {
+				l[i], l[j] = l[j], l[i]
+			}
+		}
+	}
+	return l
+}
+
+func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *reqEnv) {
 	if rest, ok := strings.CutPrefix(p, "/_ui/auth/"); ok {
 		id, action, _ := strings.Cut(rest, "/")
 		if config.ValidProvider(id) && (action == "start" || action == "callback") {
@@ -413,16 +329,55 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 			}
 			return
 		}
-		writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
+		notFound(w)
 		return
 	}
-	if !strings.HasPrefix(p, "/_ui/api/") {
-		writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
+	rest, ok := strings.CutPrefix(p, "/_ui/api/")
+	if !ok {
+		notFound(w)
+		return
+	}
+	seg := strings.Split(strings.TrimSuffix(rest, "/"), "/")
+
+	// Public endpoints.
+	switch {
+	case rest == "auth/state":
+		dispatch(w, r, handlers{"GET": func() { s.handleState(w, r, re) }})
+		return
+	case rest == "auth/setup" || rest == "auth/login" || rest == "auth/logout":
+		dispatch(w, r, handlers{"POST": func() {
+			if !csrfOK(r, re.rv) {
+				writeCSRF(w)
+				return
+			}
+			switch rest {
+			case "auth/setup":
+				s.handleSetup(w, r, re)
+			case "auth/login":
+				s.handleLogin(w, r, re)
+			default:
+				s.handleLogout(w, r, re)
+			}
+		}})
+		return
+	case len(seg) == 2 && seg[0] == "invites" && r.Method != http.MethodDelete:
+		// GET /invites/{token} is public; DELETE /invites/{id} is admin.
+		dispatch(w, r, handlers{"GET": func() { s.handleInvitePublic(w, r, re, seg[1]) }})
+		return
+	case len(seg) == 3 && seg[0] == "invites" && seg[2] == "accept":
+		dispatch(w, r, handlers{"POST": func() {
+			if !csrfOK(r, re.rv) {
+				writeCSRF(w)
+				return
+			}
+			s.handleInviteAccept(w, r, re, seg[1])
+		}})
 		return
 	}
 
-	// Protected endpoints.
-	id, fail := s.authenticate(w, r, re)
+	// Protected endpoints: a session (or header login, or login disabled).
+	// API tokens are never accepted here.
+	pr, fail := s.authenticate(w, r, re)
 	if fail != "" {
 		writeAuthFail(w, fail)
 		return
@@ -431,43 +386,92 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 		writeCSRF(w)
 		return
 	}
-	switch {
-	case p == "/_ui/api/auth/logout-all":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, "POST")
-			return
-		}
-		s.handleLogoutAll(w, r, re, id)
-	case p == "/_ui/api/settings":
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			writeJSON(w, http.StatusOK, s.settingsView(r, re))
-		case http.MethodPut:
-			s.handleSettingsPut(w, r, re, id)
-		default:
-			methodNotAllowed(w, "GET, PUT")
-		}
-	case strings.HasPrefix(p, "/_ui/api/settings/providers/"):
-		rest := strings.TrimPrefix(p, "/_ui/api/settings/providers/")
-		parts := strings.Split(rest, "/")
-		if len(parts) < 2 || !config.ValidProvider(parts[0]) || parts[1] != "test" || len(parts) > 3 {
-			writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
-			return
-		}
-		if len(parts) == 2 {
-			if r.Method != http.MethodPost {
-				methodNotAllowed(w, "POST")
+	admin := func(f func()) func() {
+		return func() {
+			if !pr.isAdmin() {
+				writeForbidden(w)
 				return
 			}
-			s.handleProviderTest(w, r, re, parts[0])
-			return
+			f()
 		}
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, "GET")
-			return
-		}
-		s.handleProviderTestStatus(w, parts[0], parts[2])
-	default:
-		writeErr(w, http.StatusNotFound, "not_found", "Не найдено")
 	}
+
+	switch {
+	case rest == "auth/logout-all":
+		dispatch(w, r, handlers{"POST": func() { s.handleLogoutAll(w, r, re, pr) }})
+
+	// ---- me ----
+	case rest == "me":
+		dispatch(w, r, handlers{
+			"GET":   func() { s.handleMe(w, r, re, pr) },
+			"PATCH": func() { s.handleMePatch(w, r, re, pr) },
+		})
+	case rest == "me/password":
+		dispatch(w, r, handlers{"POST": func() { s.handleMePassword(w, r, re, pr) }})
+	case len(seg) == 3 && seg[0] == "me" && seg[1] == "identities":
+		dispatch(w, r, handlers{"DELETE": func() { s.handleUnlink(w, r, re, pr, pr.uid(), seg[2]) }})
+	case rest == "me/tokens":
+		dispatch(w, r, handlers{
+			"GET":  func() { s.handleMyTokens(w, re, pr) },
+			"POST": func() { s.handleTokenCreate(w, r, re, pr) },
+		})
+	case len(seg) == 3 && seg[0] == "me" && seg[1] == "tokens":
+		dispatch(w, r, handlers{"DELETE": func() { s.handleTokenDelete(w, r, re, pr, seg[2], true) }})
+
+	// ---- users (admin) ----
+	case rest == "users":
+		dispatch(w, r, handlers{
+			"GET":  admin(func() { s.handleUsersList(w, re) }),
+			"POST": admin(func() { s.handleUserCreate(w, r, re, pr) }),
+		})
+	case len(seg) == 2 && seg[0] == "users":
+		dispatch(w, r, handlers{
+			"PATCH":  admin(func() { s.handleUserPatch(w, r, re, pr, seg[1]) }),
+			"DELETE": admin(func() { s.handleUserDelete(w, r, re, pr, seg[1]) }),
+		})
+	case len(seg) == 3 && seg[0] == "users" && seg[2] == "logout":
+		dispatch(w, r, handlers{"POST": admin(func() { s.handleUserLogout(w, r, re, pr, seg[1]) })})
+	case len(seg) == 3 && seg[0] == "users" && seg[2] == "tokens":
+		dispatch(w, r, handlers{"GET": admin(func() { s.handleUserTokens(w, re, seg[1]) })})
+	case len(seg) == 4 && seg[0] == "users" && seg[2] == "identities":
+		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleUnlink(w, r, re, pr, seg[1], seg[3]) })})
+	case len(seg) == 2 && seg[0] == "tokens":
+		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleTokenDelete(w, r, re, pr, seg[1], false) })})
+
+	// ---- invites (admin) ----
+	case rest == "invites":
+		dispatch(w, r, handlers{
+			"GET":  admin(func() { s.handleInvitesList(w, re) }),
+			"POST": admin(func() { s.handleInviteCreate(w, r, re, pr) }),
+		})
+	case len(seg) == 2 && seg[0] == "invites": // DELETE (others are public, above)
+		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleInviteDelete(w, r, re, pr, seg[1]) })})
+
+	// ---- settings (admin) ----
+	case rest == "settings":
+		dispatch(w, r, handlers{
+			"GET": admin(func() { writeJSON(w, http.StatusOK, s.settingsView(r, re)) }),
+			"PUT": admin(func() { s.handleSettingsPut(w, r, re, pr) }),
+		})
+	case strings.HasPrefix(rest, "settings/providers/"):
+		if len(seg) < 4 || len(seg) > 5 || !config.ValidProvider(seg[2]) || seg[3] != "test" {
+			notFound(w)
+			return
+		}
+		if len(seg) == 4 {
+			dispatch(w, r, handlers{"POST": admin(func() { s.handleProviderTest(w, r, re, seg[2]) })})
+			return
+		}
+		dispatch(w, r, handlers{"GET": admin(func() { s.handleProviderTestStatus(w, seg[2], seg[4]) })})
+	default:
+		notFound(w)
+	}
+}
+
+// errAPI helpers.
+var errNoUser = &apiError{Status: http.StatusConflict, Code: "no_user", Message: "Вход отключён: нет учётной записи"}
+
+func isAPIError(err error, code string) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && ae.Code == code
 }

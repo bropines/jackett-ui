@@ -1,15 +1,15 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { createRootRouteWithContext, createRoute, createRouter, Outlet, type RouterHistory } from "@tanstack/react-router";
+import { createRootRouteWithContext, createRoute, createRouter, type RouterHistory } from "@tanstack/react-router";
 
-import { AppShell } from "@/components/layout/AppShell";
-import { AuthGate } from "@/components/layout/AuthGate";
-import { TooltipProvider } from "@/components/ui/misc";
-import { Toaster } from "@/components/ui/sonner";
+import { RequireRole } from "@/components/auth/RequireRole";
+import { RootLayout } from "@/components/layout/RootLayout";
+import { InvitePage } from "@/pages/auth/InvitePage";
 import { IndexersPage, type IndexersPageSearch } from "@/pages/IndexersPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
+import { ProfilePage } from "@/pages/ProfilePage";
 import { SearchPage, type SearchPageSearch } from "@/pages/SearchPage";
-import { SettingsPage } from "@/pages/SettingsPage";
+import { SettingsPage, type SettingsPageSearch } from "@/pages/SettingsPage";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -29,16 +29,7 @@ function stringifySearch(obj: Record<string, unknown>): string {
 }
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  component: () => (
-    <TooltipProvider delayDuration={300}>
-      <AuthGate>
-        <AppShell>
-          <Outlet />
-        </AppShell>
-      </AuthGate>
-      <Toaster richColors closeButton />
-    </TooltipProvider>
-  ),
+  component: RootLayout,
   notFoundComponent: NotFoundPage,
 });
 
@@ -58,10 +49,35 @@ const indexersRoute = createRoute({
   component: IndexersPage,
 });
 
-const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage });
-const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", component: LogsPage });
+const TABS = new Set(["panel", "users", "jackett"]);
 
-const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute]);
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  // tab = panel | users | jackett
+  validateSearch: (s: Record<string, unknown>): SettingsPageSearch => {
+    const tab = str(s.tab);
+    return { tab: tab && TABS.has(tab) ? (tab as SettingsPageSearch["tab"]) : undefined };
+  },
+  component: () => (
+    <RequireRole min="admin">
+      <SettingsPage />
+    </RequireRole>
+  ),
+});
+const logsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/logs",
+  component: () => (
+    <RequireRole min="editor">
+      <LogsPage />
+    </RequireRole>
+  ),
+});
+const profileRoute = createRoute({ getParentRoute: () => rootRoute, path: "/profile", component: ProfilePage });
+const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite/$token", component: InvitePage });
+
+const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute, profileRoute, inviteRoute]);
 
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
   return createRouter({

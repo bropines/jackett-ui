@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,7 +10,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/bropines/jackett-ui/server/internal/auth"
 	"github.com/bropines/jackett-ui/server/internal/config"
 	"github.com/bropines/jackett-ui/server/internal/netutil"
 	"github.com/bropines/jackett-ui/server/internal/store"
@@ -53,14 +51,22 @@ func (s *Server) settingsView(r *http.Request, re *reqEnv) map[string]any {
 		}
 		providers[id] = v
 	}
+	methods := map[string]fieldView{}
+	for _, id := range config.MethodIDs {
+		methods[id] = fieldView{Value: eff.Methods.Value.Get(id), Locked: eff.Methods.Locked, Env: eff.Methods.Env}
+	}
 	return map[string]any{
 		"auth": map[string]any{
-			"mode":             fv(eff.Mode),
-			"passwordSet":      fieldView{Value: eff.PasswordHash.Value != "", Locked: eff.PasswordHash.Locked, Env: eff.PasswordHash.Env},
-			"passwordFallback": fv(eff.PasswordFallback),
-			"allowedEmails":    fv(eff.AllowedEmails),
-			"githubUsers":      fv(eff.GitHubUsers),
-			"providers":        providers,
+			"methods":  methods,
+			"disabled": fv(eff.Disabled),
+			"autoProvision": map[string]any{
+				"enabled": fv(eff.AutoProvision),
+				"role":    fv(eff.DefaultRole),
+			},
+			"allowedEmails": fv(eff.AllowedEmails),
+			"adminEmails":   fv(eff.AdminEmails),
+			"githubUsers":   fv(eff.GitHubUsers),
+			"providers":     providers,
 			"header": map[string]any{
 				"name":    fv(eff.HeaderName),
 				"trusted": fv(eff.HeaderTrusted),
@@ -101,49 +107,61 @@ type putProvider struct {
 	AllowUnverifiedEmail opt[bool] `json:"allowUnverifiedEmail"`
 }
 
-type putPassword struct {
-	Current string `json:"current"`
-	New     string `json:"new"`
-}
-
 type putHeader struct {
 	Name    opt[string]   `json:"name"`
 	Trusted opt[[]string] `json:"trusted"`
 }
 
+type putMethods struct {
+	Password opt[bool] `json:"password"`
+	OIDC     opt[bool] `json:"oidc"`
+	Google   opt[bool] `json:"google"`
+	GitHub   opt[bool] `json:"github"`
+	Header   opt[bool] `json:"header"`
+}
+
+func (m *putMethods) get(id string) opt[bool] {
+	switch id {
+	case "password":
+		return m.Password
+	case config.ProviderOIDC:
+		return m.OIDC
+	case config.ProviderGoogle:
+		return m.Google
+	case config.ProviderGitHub:
+		return m.GitHub
+	case "header":
+		return m.Header
+	}
+	return opt[bool]{}
+}
+
+type putAutoProvision struct {
+	Enabled opt[bool]   `json:"enabled"`
+	Role    opt[string] `json:"role"`
+}
+
 type putAuth struct {
-	Mode             opt[string]   `json:"mode"`
-	PasswordFallback opt[bool]     `json:"passwordFallback"`
-	AllowedEmails    opt[[]string] `json:"allowedEmails"`
-	GitHubUsers      opt[[]string] `json:"githubUsers"`
-	Providers        *struct {
+	Methods       *putMethods       `json:"methods"`
+	Disabled      opt[bool]         `json:"disabled"`
+	AutoProvision *putAutoProvision `json:"autoProvision"`
+	AllowedEmails opt[[]string]     `json:"allowedEmails"`
+	AdminEmails   opt[[]string]     `json:"adminEmails"`
+	GitHubUsers   opt[[]string]     `json:"githubUsers"`
+	Providers     *struct {
 		OIDC   *putProvider `json:"oidc"`
 		Google *putProvider `json:"google"`
 		GitHub *putProvider `json:"github"`
 	} `json:"providers"`
-	Header   *putHeader   `json:"header"`
-	Password *putPassword `json:"password"`
-	Confirm  bool         `json:"confirm"`
+	Header  *putHeader `json:"header"`
+	Confirm bool       `json:"confirm"`
 }
 
 type putRequest struct {
-	Auth       *putAuth     `json:"auth"`
-	PublicURL  opt[string]  `json:"publicUrl"`
-	SessionTTL opt[string]  `json:"sessionTtl"`
-	Password   *putPassword `json:"password"` // alias of auth.password
-	Confirm    bool         `json:"confirm"`  // alias of auth.confirm
-}
-
-func lockedErr(field, env string) error {
-	msg := "Значение задано переменной окружения"
-	if env != "" {
-		msg += " " + env
-	}
-	return &apiError{Status: http.StatusConflict, Code: "locked", Message: msg, Field: field}
-}
-
-func badField(field, msg string) error {
-	return &apiError{Status: http.StatusBadRequest, Code: "invalid_value", Message: msg, Field: field}
+	Auth       *putAuth    `json:"auth"`
+	PublicURL  opt[string] `json:"publicUrl"`
+	SessionTTL opt[string] `json:"sessionTtl"`
+	Confirm    bool        `json:"confirm"` // alias of auth.confirm
 }
 
 func validText(s string, max int) bool {
@@ -327,18 +345,26 @@ func (a *putAuth) provider(id string) *putProvider {
 	return nil
 }
 
-func conflict(code, msg string) error {
-	return &apiError{Status: http.StatusConflict, Code: code, Message: msg}
+// applyBool applies o to *dst respecting the lock on f.
+func applyBool(field string, o opt[bool], f config.Field[bool], dst *bool) error {
+	if !o.Set {
+		return nil
+	}
+	if f.Locked {
+		if o.Null || o.V != f.Value {
+			return lockedErr(field, f.Env)
+		}
+		return nil
+	}
+	if o.Null {
+		*dst = false
+		return nil
+	}
+	*dst = o.V
+	return nil
 }
 
-// settingsUpdate is the outcome of a PUT.
-type settingsUpdate struct {
-	cur, next   config.Effective
-	pwChanged   bool
-	modeChanged bool
-}
-
-func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request, re *reqEnv, id auth.Identity) {
+func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request, re *reqEnv, pr *principal) {
 	var req putRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeAPIError(w, err)
@@ -348,87 +374,58 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request, re *r
 	if a == nil {
 		a = &putAuth{}
 	}
-	pw := a.Password
-	if req.Password != nil {
-		if pw != nil {
-			writeAPIError(w, badField("password", "Пароль передан дважды"))
-			return
-		}
-		pw = req.Password
-	}
 	confirm := a.Confirm || req.Confirm
 
-	// Hash the new password before taking the store lock (bcrypt is slow).
-	var newHash string
-	if pw != nil {
-		if re.eff.PasswordHash.Locked {
-			writeAPIError(w, lockedErr("auth.password", re.eff.PasswordHash.Env))
-			return
-		}
-		if re.eff.PasswordHash.Value != "" {
-			if !s.rateLimit(w, r, re) {
-				return
-			}
-			if !auth.CheckPassword(re.eff.PasswordHash.Value, pw.Current) {
-				s.limiter.Failure(re.rv.ClientIP(r))
-				s.log.Warn("password change: wrong current password", "user", id.User, "ip", re.rv.ClientIP(r).String())
-				writeAPIError(w, &apiError{Status: http.StatusForbidden, Code: "invalid_credentials", Message: "Текущий пароль неверен", Field: "password.current"})
-				return
-			}
-			s.limiter.Success(re.rv.ClientIP(r))
-		}
-		h, err := auth.HashPassword(pw.New)
-		if err != nil {
-			perr := passwordAPIError(err)
-			var ae *apiError
-			if errors.As(perr, &ae) {
-				ae.Field = "password.new"
-			}
-			writeAPIError(w, perr)
-			return
-		}
-		newHash = h
-	}
-
-	var up settingsUpdate
+	var cur, next config.Effective
 	err := s.store.Update(func(st *store.Settings) error {
-		cur, err := config.Resolve(s.env, *st)
-		if err != nil {
+		var err error
+		if cur, err = config.Resolve(s.env, *st); err != nil {
 			return err
 		}
-		up.cur = cur
-		if pw != nil && cur.PasswordHash.Value != re.eff.PasswordHash.Value {
-			return conflict("conflict", "Пароль изменился, повторите попытку")
-		}
 
-		// Mode.
-		newMode := cur.Mode.Value
-		if a.Mode.Set {
-			m := ""
-			if !a.Mode.Null {
-				m = config.NormalizeMode(a.Mode.V)
-			}
-			if !auth.ValidMode(m) {
-				return badField("auth.mode", "Неизвестный режим входа")
-			}
-			if cur.Mode.Locked && m != cur.Mode.Value {
-				return lockedErr("auth.mode", cur.Mode.Env)
-			}
-			newMode = m
-		}
-		if a.PasswordFallback.Set {
-			if cur.PasswordFallback.Locked {
-				if a.PasswordFallback.Null || a.PasswordFallback.V != cur.PasswordFallback.Value {
-					return lockedErr("auth.passwordFallback", cur.PasswordFallback.Env)
+		// Login methods (AUTH_METHODS / AUTH_MODE lock the whole block).
+		if m := a.Methods; m != nil {
+			for _, id := range config.MethodIDs {
+				o := m.get(id)
+				if !o.Set {
+					continue
 				}
-			} else if a.PasswordFallback.Null {
-				st.Auth.PasswordFallback = nil
-			} else {
-				v := a.PasswordFallback.V
-				st.Auth.PasswordFallback = &v
+				v := o.Set && !o.Null && o.V
+				if cur.Methods.Locked {
+					if v != cur.Methods.Value.Get(id) {
+						return lockedErr("auth.methods."+id, cur.Methods.Env)
+					}
+					continue
+				}
+				*st.Auth.Methods.Ptr(id) = v
+			}
+		}
+		if err := applyBool("auth.disabled", a.Disabled, cur.Disabled, &st.Auth.Disabled); err != nil {
+			return err
+		}
+		if ap := a.AutoProvision; ap != nil {
+			if err := applyBool("auth.autoProvision.enabled", ap.Enabled, cur.AutoProvision, &st.Auth.AutoProvision.Enabled); err != nil {
+				return err
+			}
+			if ap.Role.Set && !ap.Role.Null {
+				ap.Role.V = strings.ToLower(strings.TrimSpace(ap.Role.V))
+			}
+			if err := applyString("auth.autoProvision.role", ap.Role, cur.DefaultRole, &st.Auth.AutoProvision.Role, false, func(v string) error {
+				if !config.ValidRole(v) {
+					return badField("auth.autoProvision.role", "Роль: viewer, editor или admin")
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			if st.Auth.AutoProvision.Role == "" {
+				st.Auth.AutoProvision.Role = store.RoleViewer
 			}
 		}
 		if err := applyList("auth.allowedEmails", a.AllowedEmails, cur.AllowedEmails, &st.Auth.AllowedEmails, nil); err != nil {
+			return err
+		}
+		if err := applyList("auth.adminEmails", a.AdminEmails, cur.AdminEmails, &st.Auth.AdminEmails, nil); err != nil {
 			return err
 		}
 		if err := applyList("auth.githubUsers", a.GitHubUsers, cur.GitHubUsers, &st.Auth.GitHubUsers, nil); err != nil {
@@ -484,64 +481,33 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request, re *r
 		}); err != nil {
 			return err
 		}
-		if newHash != "" {
-			st.Auth.PasswordHash = newHash
-			up.pwChanged = true
-		}
-		if !cur.Mode.Locked {
-			st.Auth.Mode = newMode
-		}
 
-		next, err := config.Resolve(s.env, *st)
-		if err != nil {
+		if next, err = config.Resolve(s.env, *st); err != nil {
 			return badField("", err.Error())
 		}
-		up.next = next
-		up.modeChanged = next.Mode.Value != cur.Mode.Value
 
-		// Mode rules.
-		if up.modeChanged {
-			switch next.Mode.Value {
-			case auth.ModeNone:
-				if !confirm {
-					return &apiError{Status: http.StatusBadRequest, Code: "confirm_required", Message: "Режим без входа нужно подтвердить (confirm: true)", Field: "auth.mode"}
-				}
-			case auth.ModeHeader:
-				if len(next.HeaderPrefixes) == 0 {
-					return &apiError{Status: http.StatusBadRequest, Code: "header_trusted_required", Message: "Укажите доверенные адреса прокси", Field: "auth.header.trusted"}
-				}
-			case auth.ModePassword:
-				if next.PasswordHash.Value == "" {
-					return &apiError{Status: http.StatusBadRequest, Code: "password_required", Message: "Сначала задайте пароль", Field: "password"}
-				}
-			case auth.ModeSSO:
-				verified := false
-				for _, p := range next.EnabledProviders() {
-					verified = verified || p.Verified()
-				}
-				if !verified {
-					return conflict("sso_not_ready", "Сначала настройте и проверьте вход хотя бы через одного провайдера")
-				}
-				if len(next.LoginProviders()) == 0 {
-					return conflict(errNoAllowList.Error(), "Задайте список разрешённых пользователей (e-mail, логины GitHub или группы)")
-				}
+		// Rules for switching methods on.
+		for _, id := range config.ProviderIDs {
+			if next.Methods.Value.Get(id) && !cur.Methods.Value.Get(id) && !next.ProviderReady(id) {
+				return &apiError{Status: http.StatusConflict, Code: "provider_not_ready", Field: "auth.methods." + id,
+					Message: "Сначала настройте и проверьте вход через этого провайдера"}
 			}
 		}
-		// Changing providers / allow-lists in sso mode must leave a way in.
-		if next.Mode.Value == auth.ModeSSO && !up.modeChanged && len(cur.LoginProviders()) > 0 &&
-			len(next.LoginProviders()) == 0 && !next.PasswordLogin() {
-			return conflict("would_lock_out", "После этого изменения никто не сможет войти: проверьте провайдера или включите вход по паролю")
+		if next.Methods.Value.Header && !cur.Methods.Value.Header && len(next.HeaderPrefixes) == 0 {
+			return &apiError{Status: http.StatusBadRequest, Code: "header_trusted_required", Message: "Укажите доверенные адреса прокси", Field: "auth.header.trusted"}
 		}
-		// The caller must keep access in header mode.
-		if next.Mode.Value == auth.ModeHeader && (up.modeChanged || a.Header != nil) {
-			h := auth.Header{Name: next.HeaderName.Value, Trusted: next.HeaderPrefixes}
-			if _, ok := h.User(r); !ok {
-				return conflict("header_lockout", "Ваш запрос пришёл не через доверенный прокси с заголовком "+next.HeaderName.Value+": после переключения вы потеряете доступ")
+		if next.Disabled.Value && !cur.Disabled.Value && !confirm {
+			return &apiError{Status: http.StatusBadRequest, Code: "confirm_required", Message: "Отключение входа нужно подтвердить (confirm: true)", Field: "auth.disabled"}
+		}
+		// Every change that touches logins must leave an admin a way in.
+		touchesLogin := a.Methods != nil || a.Disabled.Set || a.Providers != nil || a.Header != nil
+		if touchesLogin && s.adminsLockedOut(next, st, r) {
+			field := ""
+			if a.Methods != nil {
+				field = "auth.methods"
 			}
-		}
-		if up.modeChanged || up.pwChanged {
-			st.AuthEpoch++
-			up.next.Epoch = st.AuthEpoch
+			return &apiError{Status: http.StatusConflict, Code: "would_lock_out", Field: field,
+				Message: "После этого изменения ни один администратор не сможет войти: включите способ входа, который у администратора настроен (пароль или привязанный аккаунт)"}
 		}
 		return nil
 	})
@@ -551,24 +517,14 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request, re *r
 	}
 
 	ip := re.rv.ClientIP(r).String()
-	if up.modeChanged {
-		s.log.Warn("auth mode changed", "from", up.cur.Mode.Value, "to", up.next.Mode.Value, "user", id.User, "ip", ip)
+	if cur.Methods.Value != next.Methods.Value || cur.Disabled.Value != next.Disabled.Value {
+		s.log.Warn("login methods changed", "from", fmt.Sprintf("%+v", cur.Methods.Value), "to", fmt.Sprintf("%+v", next.Methods.Value),
+			"disabled", next.Disabled.Value, "user", pr.name(), "ip", ip)
 	}
-	if up.pwChanged {
-		s.log.Warn("admin password changed", "user", id.User, "ip", ip)
-	}
-	nre := &reqEnv{eff: up.next, rv: s.resolver(up.next)}
-	if up.modeChanged || up.pwChanged {
-		switch m := up.next.Mode.Value; m {
-		case auth.ModePassword, auth.ModeSSO:
-			user := id.User
-			if m == auth.ModePassword {
-				user = auth.AdminUser
-			}
-			s.issueSession(w, r, nre, user, m, up.next.Epoch)
-		default:
-			s.clearSession(w, r, nre)
-		}
+	nre, err := s.newReqEnv()
+	if err != nil {
+		writeAPIError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, s.settingsView(r, nre))
 }
@@ -596,10 +552,6 @@ func (s *Server) handleProviderTest(w http.ResponseWriter, r *http.Request, re *
 	p := eff.Providers[id]
 	if !p.Enabled() {
 		writeAPIError(w, &apiError{Status: http.StatusBadRequest, Code: "provider_incomplete", Message: "Заполните настройки провайдера (issuer, client id, secret)"})
-		return
-	}
-	if !eff.ProviderCanAllow(id) {
-		writeAPIError(w, conflict(errNoAllowList.Error(), "Сначала задайте список разрешённых пользователей (e-mail, логины GitHub или группы)"))
 		return
 	}
 	redirect := redirectURL(re.rv.Origin(r), id)

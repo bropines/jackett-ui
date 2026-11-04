@@ -9,100 +9,110 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/bropines/jackett-ui/server/internal/auth"
 	"github.com/bropines/jackett-ui/server/internal/auth/github"
 	"github.com/bropines/jackett-ui/server/internal/auth/oidc"
 	"github.com/bropines/jackett-ui/server/internal/config"
 	"github.com/bropines/jackett-ui/server/internal/store"
+	"github.com/bropines/jackett-ui/server/internal/users"
 )
 
 // extProvider is a configured external login provider. Adding a provider
 // kind = a providerFactory plus an adapter implementing this.
 type extProvider interface {
-	start(w http.ResponseWriter, r *http.Request, s oidc.Signer, returnPath, testToken string, secure bool) (string, error)
+	start(w http.ResponseWriter, r *http.Request, s oidc.Signer, returnPath, intent string, secure bool) (string, error)
 	finish(w http.ResponseWriter, r *http.Request, s oidc.Signer, secure bool) (extResult, error)
 }
 
-// extResult is a finished, allow-listed external login.
+// extResult is a finished external login: the identity (allow-lists not
+// applied: that depends on what the login is for), the return path and the
+// flow's intent.
 type extResult struct {
-	User       string
+	Identity   extIdentity
 	ReturnPath string
-	TestToken  string
+	Intent     string
 }
 
-// providerFactory builds an extProvider for the effective provider config,
-// the allow-lists of eff and the redirect URL. It may do network I/O
-// (OIDC discovery).
+// providerFactory builds an extProvider for the effective provider config
+// and the redirect URL. It may do network I/O (OIDC discovery).
 type providerFactory func(ctx context.Context, p config.Provider, eff config.Effective, redirect string) (extProvider, error)
-
-// errNoAllowList: no allow-list could admit users of this provider, so the
-// login is refused before it starts.
-var errNoAllowList = errors.New("allowlist_required")
 
 // ---- oidc / google ----
 
-type oidcAdapter struct{ p *oidc.Provider }
+type oidcAdapter struct {
+	p               *oidc.Provider
+	id              string
+	allowUnverified bool
+}
 
-func (a oidcAdapter) start(w http.ResponseWriter, r *http.Request, s oidc.Signer, rp, tt string, secure bool) (string, error) {
-	return a.p.Start(w, r, s, rp, tt, secure)
+func (a oidcAdapter) start(w http.ResponseWriter, r *http.Request, s oidc.Signer, rp, intent string, secure bool) (string, error) {
+	return a.p.Start(w, r, s, rp, intent, secure)
 }
 
 func (a oidcAdapter) finish(w http.ResponseWriter, r *http.Request, s oidc.Signer, secure bool) (extResult, error) {
-	// The oidc package enforces the allow-lists we pass in its Config
-	// (verified e-mail ∈ AUTH_ALLOWED_EMAILS, or group ∈ OIDC_ALLOWED_GROUPS).
+	// The oidc package gets no allow-lists (= admits every user of the IdP):
+	// httpapi decides per intent (linked identity, auto-provisioning, invite).
 	res, err := a.p.Finish(w, r, s, secure)
 	if err != nil {
 		return extResult{}, err
 	}
-	return extResult{User: res.Identity.User, ReturnPath: res.ReturnPath, TestToken: res.TestToken}, nil
+	id := res.Identity
+	label := id.Email
+	if label == "" {
+		label = id.PreferredUsername
+	}
+	if label == "" {
+		label = id.Subject
+	}
+	hint := id.Email
+	if hint == "" {
+		hint = id.PreferredUsername
+	}
+	if hint == "" {
+		hint = "user"
+	}
+	return extResult{
+		Identity: extIdentity{
+			Provider: a.id, Issuer: id.Issuer, Subject: id.Subject,
+			Email: strings.ToLower(id.Email), EmailUsable: id.EmailUsable(a.allowUnverified),
+			Groups: id.Groups, Name: id.Name, Label: label, UsernameHint: hint,
+		},
+		ReturnPath: res.ReturnPath, Intent: res.TestToken,
+	}, nil
 }
 
-func (s *Server) oidcFactory(ctx context.Context, p config.Provider, eff config.Effective, redirect string) (extProvider, error) {
-	if !eff.ProviderCanAllow(p.ID) {
-		return nil, errNoAllowList
-	}
+func (s *Server) oidcFactory(ctx context.Context, p config.Provider, _ config.Effective, redirect string) (extProvider, error) {
 	cfg := oidc.Config{
-		Issuer:        p.Issuer.Value,
-		ClientID:      p.ClientID.Value,
-		ClientSecret:  p.ClientSecret.Value,
-		Scopes:        strings.Fields(p.Scopes.Value),
-		AllowedEmails: eff.AllowedEmails.Value,
-		RedirectURL:   redirect,
+		Issuer:       p.Issuer.Value,
+		ClientID:     p.ClientID.Value,
+		ClientSecret: p.ClientSecret.Value,
+		Scopes:       strings.Fields(p.Scopes.Value),
+		RedirectURL:  redirect,
 	}
 	if p.ID == config.ProviderGoogle {
 		cfg.Issuer = s.googleIssuer
 	}
 	if p.ID == config.ProviderOIDC {
-		cfg.AllowedGroups = p.Groups.Value
 		cfg.GroupsClaim = p.GroupsClaim.Value
-		cfg.AllowUnverifiedEmail = p.AllowUnverifiedEmail.Value
-	}
-	if len(cfg.AllowedEmails) == 0 && len(cfg.AllowedGroups) == 0 {
-		// Never hand the oidc package empty lists: that means "anyone".
-		return nil, errNoAllowList
 	}
 	op, err := oidc.New(ctx, cfg, s.httpClient)
 	if err != nil {
 		return nil, err
 	}
-	return oidcAdapter{op}, nil
+	return oidcAdapter{p: op, id: p.ID, allowUnverified: p.ID == config.ProviderOIDC && p.AllowUnverifiedEmail.Value}, nil
 }
 
 // ---- github ----
 
-type githubAdapter struct {
-	p      *github.Provider
-	emails []string
-	users  []string
-}
+type githubAdapter struct{ p *github.Provider }
 
-func (a githubAdapter) start(w http.ResponseWriter, r *http.Request, s oidc.Signer, rp, tt string, secure bool) (string, error) {
-	return a.p.Start(w, r, s, rp, tt, secure)
+func (a githubAdapter) start(w http.ResponseWriter, r *http.Request, s oidc.Signer, rp, intent string, secure bool) (string, error) {
+	return a.p.Start(w, r, s, rp, intent, secure)
 }
 
 func (a githubAdapter) finish(w http.ResponseWriter, r *http.Request, s oidc.Signer, secure bool) (extResult, error) {
@@ -111,18 +121,18 @@ func (a githubAdapter) finish(w http.ResponseWriter, r *http.Request, s oidc.Sig
 		return extResult{}, err
 	}
 	id := res.Identity
-	// Email is only set when it is GitHub's primary verified address.
-	allowed := (id.Email != "" && containsFold(a.emails, id.Email)) || (id.Login != "" && containsFold(a.users, id.Login))
-	if !allowed {
-		return extResult{}, oidc.ErrNotAllowed
-	}
-	return extResult{User: id.User(), ReturnPath: res.ReturnPath, TestToken: res.TestToken}, nil
+	return extResult{
+		Identity: extIdentity{
+			Provider: config.ProviderGitHub, Issuer: github.Issuer, Subject: id.Subject(),
+			// Email is only set when it is GitHub's primary verified address.
+			Email: id.Email, EmailUsable: id.Email != "", Login: id.Login,
+			Name: id.Name, Label: id.User(), UsernameHint: id.Login,
+		},
+		ReturnPath: res.ReturnPath, Intent: res.TestToken,
+	}, nil
 }
 
-func (s *Server) githubFactory(_ context.Context, p config.Provider, eff config.Effective, redirect string) (extProvider, error) {
-	if !eff.ProviderCanAllow(p.ID) {
-		return nil, errNoAllowList
-	}
+func (s *Server) githubFactory(_ context.Context, p config.Provider, _ config.Effective, redirect string) (extProvider, error) {
 	gp, err := github.New(github.Config{
 		ClientID:     p.ClientID.Value,
 		ClientSecret: p.ClientSecret.Value,
@@ -132,20 +142,7 @@ func (s *Server) githubFactory(_ context.Context, p config.Provider, eff config.
 	if err != nil {
 		return nil, err
 	}
-	return githubAdapter{p: gp, emails: eff.AllowedEmails.Value, users: eff.GitHubUsers.Value}, nil
-}
-
-func containsFold(list []string, v string) bool {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return false
-	}
-	for _, x := range list {
-		if strings.EqualFold(strings.TrimSpace(x), v) {
-			return true
-		}
-	}
-	return false
+	return githubAdapter{p: gp}, nil
 }
 
 // ---- provider cache ----
@@ -160,10 +157,9 @@ type provEntry struct {
 	at   time.Time
 }
 
-func providerKey(p config.Provider, eff config.Effective, redirect string) string {
+func providerKey(p config.Provider, redirect string) string {
 	h := sha256.New()
-	for _, v := range []string{p.ID, p.Hash(), redirect, p.GroupsClaim.Value, strconv.FormatBool(p.AllowUnverifiedEmail.Value),
-		strings.Join(p.Groups.Value, ","), strings.Join(eff.AllowedEmails.Value, ","), strings.Join(eff.GitHubUsers.Value, ",")} {
+	for _, v := range []string{p.ID, p.Hash(), redirect, p.GroupsClaim.Value, strconv.FormatBool(p.AllowUnverifiedEmail.Value)} {
 		h.Write([]byte(v))
 		h.Write([]byte{0})
 	}
@@ -182,7 +178,7 @@ func (s *Server) provider(ctx context.Context, re *reqEnv, r *http.Request, id s
 		return nil, oidc.ErrNotConfigured
 	}
 	redirect := redirectURL(re.rv.Origin(r), id)
-	key := providerKey(p, re.eff, redirect)
+	key := providerKey(p, redirect)
 	s.provMu.Lock()
 	if e, ok := s.provCache[key]; ok && (e.err == nil || s.now().Sub(e.at) < provRetry) {
 		s.provMu.Unlock()
@@ -193,7 +189,7 @@ func (s *Server) provider(ctx context.Context, re *reqEnv, r *http.Request, id s
 	bctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	prov, err := s.factories[id](bctx, p, re.eff, redirect)
 	cancel()
-	if err != nil && !errors.Is(err, errNoAllowList) {
+	if err != nil {
 		s.log.Warn("login provider unavailable", "provider", id, "error", err)
 	}
 	s.provMu.Lock()
@@ -207,19 +203,31 @@ func (s *Server) provider(ctx context.Context, re *reqEnv, r *http.Request, id s
 
 // ---- start / callback ----
 
+// Flow intents (carried, signed, in the flow cookie's test-token field).
+const (
+	intentTest   = "test:"
+	intentLink   = "link:"
+	intentInvite = "invite:"
+)
+
+// redirectWith appends k=v to the (sanitized) path.
+func redirectWith(w http.ResponseWriter, r *http.Request, p, k, v string) {
+	p = oidc.SanitizeReturnPath(p)
+	sep := "?"
+	if strings.Contains(p, "?") {
+		sep = "&"
+	}
+	http.Redirect(w, r, p+sep+k+"="+url.QueryEscape(v), http.StatusFound)
+}
+
 func authErrorRedirect(w http.ResponseWriter, r *http.Request, code string) {
-	http.Redirect(w, r, "/?authError="+code, http.StatusFound)
+	redirectWith(w, r, "/", "authError", code)
 }
 
 // errCode maps login errors to fixed codes. Never put err.Error() in a URL:
 // it may contain IdP-provided text.
 func errCode(err error) string {
-	if errors.Is(err, errNoAllowList) {
-		return oidc.ErrNotAllowed.Error()
-	}
 	if errors.Is(err, oidc.ErrNotAllowed) && strings.Contains(err.Error(), "not verified") {
-		// The oidc package refuses an unverified e-mail with this wording;
-		// only a fixed code goes into the URL.
 		return "email_not_verified"
 	}
 	for _, e := range []error{oidc.ErrState, oidc.ErrFlowExpired, oidc.ErrIdP, oidc.ErrExchange,
@@ -231,15 +239,20 @@ func errCode(err error) string {
 	return oidc.ErrIdP.Error()
 }
 
+func linkIntent(u *store.User, global uint64) string {
+	return intentLink + u.ID + ":" + strconv.FormatUint(u.Epoch, 10) + ":" + strconv.FormatUint(global, 10)
+}
+
 func (s *Server) handleProviderStart(w http.ResponseWriter, r *http.Request, re *reqEnv, id string) {
 	secure := re.rv.Secure(r)
-	if tok := r.URL.Query().Get("test"); tok != "" {
+	q := r.URL.Query()
+	if tok := q.Get("test"); tok != "" {
 		tf := s.tests.get(tok)
 		if tf == nil || tf.provider != id {
 			s.renderTestPage(w, false, "test_expired")
 			return
 		}
-		u, err := tf.prov.start(w, r, s.flowSigner, "/", tok, secure)
+		u, err := tf.prov.start(w, r, s.flowSigner, "/", intentTest+tok, secure)
 		if err != nil {
 			s.tests.finish(tok, "", errCode(err))
 			s.renderTestPage(w, false, errCode(err))
@@ -248,30 +261,69 @@ func (s *Server) handleProviderStart(w http.ResponseWriter, r *http.Request, re 
 		http.Redirect(w, r, u, http.StatusFound)
 		return
 	}
-	if re.eff.Mode.Value != auth.ModeSSO {
-		authErrorRedirect(w, r, "provider_disabled")
-		return
-	}
-	if !providerOffered(re.eff, id) {
-		authErrorRedirect(w, r, "provider_disabled")
-		return
+
+	returnPath := oidc.SanitizeReturnPath(q.Get("return"))
+	var intent string
+	switch {
+	case q.Get("link") != "":
+		// Link to the logged-in user (session or header login only).
+		if q.Get("return") == "" {
+			returnPath = "/profile"
+		}
+		pr, fail := s.authenticate(w, r, re)
+		if fail != "" || pr.user == nil {
+			authErrorRedirect(w, r, failUnauthorized)
+			return
+		}
+		if !re.eff.ProviderReady(id) {
+			redirectWith(w, r, returnPath, "authError", "provider_disabled")
+			return
+		}
+		intent = linkIntent(pr.user, re.st.AuthEpoch)
+	case q.Get("invite") != "":
+		secret := q.Get("invite")
+		inv, err := s.inviteFor(&re.st, secret, "")
+		if err != nil {
+			code := "invite_not_found"
+			if errors.Is(err, errInviteExpired) {
+				code = "invite_expired"
+			}
+			authErrorRedirect(w, r, code)
+			return
+		}
+		returnPath = "/invite/" + secret
+		if !providerOffered(re.eff, id) {
+			redirectWith(w, r, returnPath, "authError", "provider_disabled")
+			return
+		}
+		intent = intentInvite + inv.Hash
+	default:
+		if !providerOffered(re.eff, id) {
+			authErrorRedirect(w, r, "provider_disabled")
+			return
+		}
 	}
 	prov, err := s.provider(r.Context(), re, r, id)
 	if err != nil {
-		if errors.Is(err, errNoAllowList) {
-			authErrorRedirect(w, r, oidc.ErrNotAllowed.Error())
-			return
-		}
-		authErrorRedirect(w, r, "not_configured")
+		redirectWith(w, r, errorBase(intent, returnPath), "authError", "not_configured")
 		return
 	}
-	u, err := prov.start(w, r, s.flowSigner, oidc.SanitizeReturnPath(r.URL.Query().Get("return")), "", secure)
+	u, err := prov.start(w, r, s.flowSigner, returnPath, intent, secure)
 	if err != nil {
 		s.log.Warn("login start failed", "provider", id, "error", err)
-		authErrorRedirect(w, r, "not_configured")
+		redirectWith(w, r, errorBase(intent, returnPath), "authError", "not_configured")
 		return
 	}
 	http.Redirect(w, r, u, http.StatusFound)
+}
+
+// errorBase: where errors of a flow go (the return path for link and
+// invite flows, "/" for logins).
+func errorBase(intent, returnPath string) string {
+	if strings.HasPrefix(intent, intentLink) || strings.HasPrefix(intent, intentInvite) {
+		return returnPath
+	}
+	return "/"
 }
 
 func providerOffered(eff config.Effective, id string) bool {
@@ -292,42 +344,154 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request, 
 	secure := re.rv.Secure(r)
 	ip := re.rv.ClientIP(r).String()
 
-	if tok := oidc.FlowTestToken(r, s.flowSigner); tok != "" {
+	intent, returnPath, _ := oidc.FlowInfo(r, s.flowSigner)
+	if tok, ok := strings.CutPrefix(intent, intentTest); ok {
 		s.finishTest(w, r, id, tok, secure)
 		return
 	}
-
-	if re.eff.Mode.Value != auth.ModeSSO || !providerOffered(re.eff, id) {
+	base := errorBase(intent, returnPath)
+	fail := func(code string) {
 		s.clearFlowCookie(w, secure)
-		authErrorRedirect(w, r, "provider_disabled")
-		return
+		redirectWith(w, r, base, "authError", code)
+	}
+
+	switch {
+	case strings.HasPrefix(intent, intentLink):
+		if !re.eff.ProviderReady(id) {
+			fail("provider_disabled")
+			return
+		}
+	default: // login, invite
+		if !providerOffered(re.eff, id) {
+			fail("provider_disabled")
+			return
+		}
 	}
 	prov, err := s.provider(r.Context(), re, r, id)
 	if err != nil {
-		s.clearFlowCookie(w, secure)
-		if errors.Is(err, errNoAllowList) {
-			authErrorRedirect(w, r, oidc.ErrNotAllowed.Error())
-			return
-		}
-		authErrorRedirect(w, r, "not_configured")
+		fail("not_configured")
 		return
 	}
 	res, err := prov.finish(w, r, s.flowSigner, secure)
-	if err == nil && res.TestToken != "" {
+	if err == nil && res.Intent != intent {
 		err = oidc.ErrState
 	}
 	if err != nil {
-		s.log.Warn("login failed", "ip", ip, "method", id, "error", err)
-		authErrorRedirect(w, r, errCode(err))
+		s.log.Warn("external login failed", "ip", ip, "provider", id, "error", err)
+		redirectWith(w, r, base, "authError", errCode(err))
 		return
 	}
-	s.log.Info("login ok", "ip", ip, "user", res.User, "method", id)
-	s.issueSession(w, r, re, res.User, auth.ModeSSO, re.eff.Epoch)
-	http.Redirect(w, r, oidc.SanitizeReturnPath(res.ReturnPath), http.StatusFound)
+
+	switch {
+	case strings.HasPrefix(intent, intentLink):
+		s.finishLink(w, r, re, id, strings.TrimPrefix(intent, intentLink), res)
+	case strings.HasPrefix(intent, intentInvite):
+		s.finishInvite(w, r, re, id, strings.TrimPrefix(intent, intentInvite), res)
+	default:
+		u, code := s.resolveExternal(res.Identity)
+		if code != "" {
+			s.log.Warn("external login refused", "ip", ip, "provider", id, "code", code, "identity", res.Identity.Label)
+			authErrorRedirect(w, r, code)
+			return
+		}
+		if err := s.loginSucceeded(w, r, re, u.ID, id); err != nil {
+			authErrorRedirect(w, r, "internal")
+			return
+		}
+		http.Redirect(w, r, oidc.SanitizeReturnPath(res.ReturnPath), http.StatusFound)
+	}
+}
+
+// finishLink links the identity to the user that started the flow, which
+// must still be the current session's user (same epochs).
+func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, re *reqEnv, id, want string, res extResult) {
+	back := res.ReturnPath
+	pr, failCode := s.authenticate(w, r, re)
+	if failCode != "" || pr.user == nil || linkIntent(pr.user, re.st.AuthEpoch) != intentLink+want {
+		redirectWith(w, r, back, "authError", "wrong_session")
+		return
+	}
+	idn := res.Identity
+	err := s.store.Update(func(st *store.Settings) error {
+		if other := users.ByIdentity(st, idn.Provider, idn.Issuer, idn.Subject); other != nil {
+			if other.ID == pr.user.ID {
+				return errNoChange
+			}
+			return conflict("identity_in_use", "")
+		}
+		u := st.User(pr.user.ID)
+		if u == nil {
+			return errUserNotFound
+		}
+		for _, x := range u.Identities {
+			if x.Provider == idn.Provider {
+				return conflict("provider_already_linked", "")
+			}
+		}
+		u.Identities = append(u.Identities, identityOf(idn, s.now()))
+		return nil
+	})
+	if err != nil && err != errNoChange {
+		var ae *apiError
+		code := "internal"
+		if errors.As(err, &ae) {
+			code = ae.Code
+		}
+		s.log.Warn("link refused", "user", pr.name(), "provider", id, "code", code)
+		redirectWith(w, r, back, "authError", code)
+		return
+	}
+	s.log.Info("identity linked", "user", pr.name(), "provider", id, "identity", idn.Label)
+	redirectWith(w, r, back, "linked", id)
+}
+
+// finishInvite creates the invited user with this identity (allow-lists are
+// not required: the invite is the permission) and logs them in.
+func (s *Server) finishInvite(w http.ResponseWriter, r *http.Request, re *reqEnv, id, hash string, res extResult) {
+	back := res.ReturnPath
+	idn := res.Identity
+	var u store.User
+	err := s.store.Update(func(st *store.Settings) error {
+		inv, err := s.inviteFor(st, "", hash)
+		if err != nil {
+			return err
+		}
+		if users.ByIdentity(st, idn.Provider, idn.Issuer, idn.Subject) != nil {
+			return conflict("identity_in_use", "")
+		}
+		name := inv.Name
+		if name == "" {
+			name = idn.Name
+		}
+		if name == "" {
+			name = idn.Label
+		}
+		u = newUser(users.DeriveUsername(idn.UsernameHint, users.UsernameTaken(st)), clipName(name), inv.Role, "", s.now())
+		u.Identities = append(u.Identities, identityOf(idn, s.now()))
+		st.Users = append(st.Users, u)
+		removeInvite(st, inv.ID)
+		return nil
+	})
+	if err != nil {
+		var ae *apiError
+		code := "internal"
+		if errors.As(err, &ae) {
+			code = ae.Code
+		}
+		redirectWith(w, r, back, "authError", code)
+		return
+	}
+	s.log.Warn("invite accepted", "user", u.Username, "role", u.Role, "provider", id)
+	if err := s.loginSucceeded(w, r, re, u.ID, id); err != nil {
+		authErrorRedirect(w, r, "internal")
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 // finishTest completes a settings "test login": on success it stores the
 // tested settings' hash as verified. The caller's session is not changed.
+// It proves the IdP round trip works; who may log in is decided per login.
 func (s *Server) finishTest(w http.ResponseWriter, r *http.Request, id, tok string, secure bool) {
 	tf := s.tests.get(tok)
 	if tf == nil || tf.provider != id {
@@ -336,7 +500,7 @@ func (s *Server) finishTest(w http.ResponseWriter, r *http.Request, id, tok stri
 		return
 	}
 	res, err := tf.prov.finish(w, r, s.flowSigner, secure)
-	if err == nil && res.TestToken != tok {
+	if err == nil && res.Intent != intentTest+tok {
 		err = oidc.ErrState
 	}
 	if err != nil {
@@ -355,8 +519,8 @@ func (s *Server) finishTest(w http.ResponseWriter, r *http.Request, id, tok stri
 		s.renderTestPage(w, false, "internal")
 		return
 	}
-	s.log.Info("test login ok, provider settings verified", "provider", id, "user", res.User)
-	s.tests.finish(tok, res.User, "")
+	s.log.Info("test login ok, provider settings verified", "provider", id, "user", res.Identity.Label)
+	s.tests.finish(tok, res.Identity.Label, "")
 	s.renderTestPage(w, true, "")
 }
 
