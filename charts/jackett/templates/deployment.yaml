@@ -63,16 +63,24 @@ spec:
         - name: jackett
           image: "{{ .Values.jackett.image.repository }}:{{ .Values.jackett.image.tag }}"
           imagePullPolicy: {{ .Values.jackett.image.pullPolicy }}
-          # linuxserver "non-root mode": started directly as this user, no s6 privilege drop.
+          # The Jackett binary runs directly as PID 1 (like the Go remnanode): no s6-overlay,
+          # which cannot start unprivileged with allowPrivilegeEscalation=false. The linuxserver
+          # init (PUID/PGID, cron, mods) is not needed here; TMPDIR/HOME go to an emptyDir.
+          command: ["/app/Jackett/jackett"]
+          args: ["--NoUpdates", "--DataFolder", "/config/Jackett"]
           securityContext:
             runAsUser: {{ .Values.runAsUser }}
             runAsGroup: {{ .Values.runAsGroup }}
             runAsNonRoot: true
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
           env:
             - { name: TZ, value: {{ .Values.jackett.tz | quote }} }
-            - { name: AUTO_UPDATE, value: "false" }
+            - { name: TMPDIR, value: /tmp }
+            - { name: HOME, value: /tmp }
+            - { name: XDG_CONFIG_HOME, value: /config }
+            - { name: XDG_DATA_HOME, value: /config }
             - { name: DOTNET_gcServer, value: "0" }
             {{- with .Values.jackett.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -89,6 +97,8 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+            - name: jackett-tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.jackett.resources | nindent 12 }}
         - name: ui
@@ -134,6 +144,9 @@ spec:
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
       volumes:
+        - name: jackett-tmp
+          emptyDir:
+            sizeLimit: 256Mi
         - name: config
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

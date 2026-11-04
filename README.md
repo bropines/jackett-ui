@@ -59,10 +59,10 @@ More ready-made setups in [`examples/`](examples/):
 
 ### Kubernetes (Helm)
 
-`charts/jackett` runs Jackett and the UI server in one pod with a volume for `/config`; the Service exposes only the UI. Every container runs as `nobody` (65534, `runAsNonRoot`, no capabilities, no privilege escalation); the linuxserver Jackett image supports this non-root mode.
+`charts/jackett` runs Jackett and the UI server in one pod with a volume for `/config`; the Service exposes only the UI. Every container runs as `nobody` (65534, `runAsNonRoot`, no capabilities, no privilege escalation); the Jackett binary from the linuxserver image is started directly as PID 1 (no s6-overlay), with a read-only root filesystem.
 
 ```
-helm install jackett oci://ghcr.io/bropines/charts/jackett --version 0.3.1 \
+helm install jackett oci://ghcr.io/bropines/charts/jackett --version 0.3.2 \
   --set persistence.storageClassName=longhorn \
   --set ingress.enabled=true --set ingress.className=traefik --set ingress.host=jackett.example.com
 ```

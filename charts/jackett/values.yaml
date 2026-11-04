@@ -86,7 +86,7 @@ ingress:
   #    hosts: [jackett.example.com]
 
 # Every container runs as this non-root user (default nobody). The linuxserver Jackett
-# image supports it ("non-root mode": it starts without s6 privilege drop).
+# Jackett binary is started directly, without s6-overlay (see templates/deployment.yaml).
 runAsUser: 65534
 runAsGroup: 65534
 
