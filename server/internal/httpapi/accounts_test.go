@@ -303,3 +303,47 @@ func TestSPARoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameUser(t *testing.T) {
+	h := newHarness(t, harnessOpt{})
+	h.setup()
+	id := h.createUser("bob", "viewer", "viewer-password")
+	bob := h.as("bob", "viewer-password")
+
+	// Self rename keeps the session; the old login stops working.
+	h.expect(h.do("PATCH", "/_ui/api/me", map[string]any{"username": "  Bropines "}), 204)
+	if st := h.state(); st.User == nil || st.User.Username != "bropines" {
+		t.Fatalf("self rename: %+v", st.User)
+	}
+	if w := h.clone().loginAs("admin", adminPW); w.Code == 204 {
+		t.Fatal("old login still works")
+	}
+	h.clone().expect(h.clone().loginAs("bropines", adminPW), 204)
+
+	for _, c := range []struct {
+		body map[string]any
+		code int
+		err  string
+	}{
+		{map[string]any{"username": "bob"}, 409, "username_taken"},
+		{map[string]any{"username": "Не так"}, 400, "invalid_username"},
+	} {
+		if w := h.do("PATCH", "/_ui/api/me", c.body); w.Code != c.code || errorCode(w) != c.err {
+			t.Fatalf("%v: %d %s", c.body, w.Code, w.Body)
+		}
+	}
+	// Same name and null are no-ops.
+	h.expect(h.do("PATCH", "/_ui/api/me", map[string]any{"username": "bropines"}), 204)
+	h.expect(h.do("PATCH", "/_ui/api/me", map[string]any{"username": nil}), 204)
+
+	// Admin renames another user; its session survives.
+	w := h.do("PATCH", "/_ui/api/users/"+id, map[string]any{"username": "robert"})
+	h.expect(w, 200)
+	if v := decode[userView](t, w); v.Username != "robert" {
+		t.Fatalf("admin rename: %+v", v)
+	}
+	bob.expect(bob.do("GET", "/_ui/api/me", nil), 200)
+	if w := h.do("PATCH", "/_ui/api/users/"+id, map[string]any{"username": "bropines"}); w.Code != 409 || errorCode(w) != "username_taken" {
+		t.Fatalf("taken: %d", w.Code)
+	}
+}

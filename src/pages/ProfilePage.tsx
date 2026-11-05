@@ -6,11 +6,11 @@ import { toast } from "sonner";
 import { ApiError, errText, providerLinkUrl, qk, serverApi, type Identity, type Me, type ProviderId } from "@/api";
 import { ProviderIcon } from "@/components/auth/ProviderIcon";
 import { RoleBadge } from "@/components/auth/RoleBadge";
-import { Callout, ConfirmDialog, ErrorState, Field, Mono, PageHeader, RelativeTime } from "@/components/common";
+import { Callout, ConfirmDialog, ErrorState, Field, PageHeader, RelativeTime } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/misc";
-import { authErrorText, EMAIL_MAX, emailError, MIN_PASSWORD, newPasswordError, normalizeEmail, PROVIDER_NAMES } from "@/lib/auth";
+import { authErrorText, EMAIL_MAX, emailError, MIN_PASSWORD, newPasswordError, normalizeEmail, PROVIDER_NAMES, usernameError } from "@/lib/auth";
 import { useAuthErrorParam, useLinkedParam } from "@/lib/auth-hooks";
 import { authStateQuery, resetSession } from "@/lib/auth-query";
 import { PasskeysCard } from "@/pages/profile/PasskeysCard";
@@ -21,15 +21,19 @@ function NameCard({ me }: { me: Me }) {
   const qc = useQueryClient();
   const curName = me.user.name ?? "";
   const curEmail = me.user.email ?? "";
+  const curLogin = me.user.username;
+  const [login, setLogin] = useState(curLogin);
   const [name, setName] = useState(curName);
   const [email, setEmail] = useState(curEmail);
   const [touched, setTouched] = useState(false);
+  useEffect(() => setLogin(curLogin), [curLogin]);
   useEffect(() => setName(curName), [curName]);
   useEffect(() => setEmail(curEmail), [curEmail]);
+  const loginDirty = login.trim().toLowerCase() !== curLogin;
   const nameDirty = name.trim() !== curName;
   const emailDirty = normalizeEmail(email) !== curEmail;
   const save = useMutation({
-    mutationFn: () => serverApi.updateMe({ ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
+    mutationFn: () => serverApi.updateMe({ ...(loginDirty ? { username: login.trim().toLowerCase() } : {}), ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
     onSuccess: () => {
       toast.success("Сохранено");
       setTouched(false);
@@ -37,15 +41,16 @@ function NameCard({ me }: { me: Me }) {
       void qc.invalidateQueries({ queryKey: qk.authState });
     },
   });
-  const dirty = nameDirty || emailDirty;
+  const dirty = loginDirty || nameDirty || emailDirty;
   const emailErr = emailError(email);
+  const loginErr = loginDirty ? usernameError(login) : undefined;
   const err = save.isError ? save.error : undefined;
   const serverEmailErr = err instanceof ApiError && (err.code === "email_taken" || err.code === "invalid_email" || err.field === "email") ? errText(err) : undefined;
+  const serverLoginErr = err instanceof ApiError && err.field === "username" ? errText(err) : undefined;
   return (
     <Section id="account" title="Учётная запись" icon={UserRound}>
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="text-muted-foreground">Имя пользователя:</span>
-        <Mono>{me.user.username}</Mono>
+        <span className="text-muted-foreground">Роль:</span>
         <RoleBadge role={me.user.role} />
       </div>
       <form
@@ -54,10 +59,22 @@ function NameCard({ me }: { me: Me }) {
         onSubmit={(e) => {
           e.preventDefault();
           setTouched(true);
-          if (dirty && !emailErr && !save.isPending) save.mutate();
+          if (dirty && !emailErr && !loginErr && !save.isPending) save.mutate();
         }}
       >
         <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Логин" htmlFor="me-login" error={(touched ? loginErr : undefined) ?? serverLoginErr} hint="Для входа по паролю" className="sm:col-span-2">
+            <Input
+              id="me-login"
+              value={login}
+              onChange={(e) => setLogin(e.target.value)}
+              maxLength={32}
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              aria-invalid={(touched && loginErr) || serverLoginErr ? true : undefined}
+            />
+          </Field>
           <Field label="Имя" htmlFor="me-name">
             <Input id="me-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="name" />
           </Field>
@@ -75,7 +92,7 @@ function NameCard({ me }: { me: Me }) {
             />
           </Field>
         </div>
-        {err && !serverEmailErr && <Callout variant="error">{errText(err)}</Callout>}
+        {err && !serverEmailErr && !serverLoginErr && <Callout variant="error">{errText(err)}</Callout>}
         <Button type="submit" variant="outline" disabled={!dirty || save.isPending}>
           {save.isPending ? <Loader2 className="animate-spin" /> : <Save />} Сохранить
         </Button>

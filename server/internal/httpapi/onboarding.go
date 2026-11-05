@@ -27,13 +27,20 @@ func emailTaken(st *store.Settings, email, uid string) bool {
 }
 
 // onboardingFor reports whether the first-login wizard is due for pr: the
-// caller is the initial admin and the wizard hasn't run.
+// caller is the initial admin and the wizard hasn't run, or an admin whose
+// password was reset from the command line.
 func onboardingFor(st *store.Settings, pr *principal) bool {
-	if pr == nil || pr.user == nil || st.Onboarded {
+	if pr == nil || pr.user == nil {
 		return false
 	}
-	u := st.User(pr.user.ID)
-	return u != nil && u.Bootstrap
+	return onboardingDue(st, st.User(pr.user.ID))
+}
+
+func onboardingDue(st *store.Settings, u *store.User) bool {
+	if u == nil || u.Disabled {
+		return false
+	}
+	return (u.Bootstrap && !st.Onboarded) || (u.Onboard && u.Role == store.RoleAdmin)
 }
 
 var errNotOnboarding = &apiError{Status: http.StatusConflict, Code: "not_onboarding", Message: "Первичная настройка уже пройдена"}
@@ -60,6 +67,9 @@ func (s *Server) handleOnboarding(w http.ResponseWriter, r *http.Request, re *re
 	if body.Mode == "skip" {
 		err := s.store.Update(func(st *store.Settings) error {
 			st.Onboarded = true
+			if me := st.User(uid); me != nil {
+				me.Onboard = false
+			}
 			return nil
 		})
 		if err != nil {
@@ -100,13 +110,11 @@ func (s *Server) handleOnboarding(w http.ResponseWriter, r *http.Request, re *re
 
 	var nu store.User
 	err = s.store.Update(func(st *store.Settings) error {
-		if st.Onboarded {
-			return errNotOnboarding
-		}
 		me := st.User(uid)
-		if me == nil || !me.Bootstrap {
+		if !onboardingDue(st, me) {
 			return errNotOnboarding
 		}
+		me.Onboard = false
 		if other := users.ByUsername(st, name); other != nil && (body.Mode == "add" || other.ID != uid) {
 			return errUsernameTaken
 		}

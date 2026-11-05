@@ -18,24 +18,25 @@ import {
   type OnboardingMode,
 } from "@/pages/auth/onboarding";
 
-const MODES: { id: OnboardingMode; title: string; description: string; icon: ReactNode }[] = [
+/** Wizard modes; `u` is the current login (the initial admin, or an admin after reset-password). */
+const modes = (u: string): { id: OnboardingMode; title: string; description: string; icon: ReactNode }[] => [
   {
     id: "replace",
-    title: "Заменить admin",
-    description: "Учётная запись admin станет вашей: новое имя и пароль. Вход admin с паролем из AUTH_PASSWORD перестанет работать.",
+    title: `Заменить ${u}`,
+    description: `Учётная запись ${u} станет вашей: новый логин и пароль. Временный пароль перестанет работать.`,
     icon: <UserRoundCog className="h-5 w-5" aria-hidden />,
   },
   {
     id: "add",
     title: "Добавить ещё одного администратора",
-    description: "Создаётся новый администратор, вы войдёте под ним. admin с паролем из AUTH_PASSWORD останется.",
+    description: `Создаётся новый администратор, вы войдёте под ним. ${u} останется.`,
     icon: <UserPlus className="h-5 w-5" aria-hidden />,
   },
 ];
 
 /**
  * First-login wizard, account step: shown by the gate while `auth/state.onboarding` is true
- * (logged in as the initial admin from AUTH_PASSWORD). `onDone(created)`: true after replace / add.
+ * (logged in as the initial admin from AUTH_PASSWORD, or as an admin after `jackett-ui reset-password`). `onDone(created)`: true after replace / add.
  */
 export function OnboardingPage({ state, onDone }: { state: AuthState; onDone: (created: boolean) => void }) {
   const [mode, setMode] = useState<OnboardingMode | null>(null);
@@ -45,6 +46,7 @@ export function OnboardingPage({ state, onDone }: { state: AuthState; onDone: (c
   const [error, setError] = useState("");
   const [serverErrors, setServerErrors] = useState<AccountErrors>({});
   const [confirmSkip, setConfirmSkip] = useState(false);
+  const login = state.user?.username ?? "admin";
 
   const errors = validateAccount(form);
   const invalid = Object.keys(errors).length > 0;
@@ -92,10 +94,10 @@ export function OnboardingPage({ state, onDone }: { state: AuthState; onDone: (c
   }
 
   return (
-    <AuthLayout title="Своя учётная запись" description="Вы вошли как admin с паролем из AUTH_PASSWORD. Создайте свою учётную запись." wide>
+    <AuthLayout title="Своя учётная запись" description={`Вы вошли как ${login} с временным паролем. Создайте свою учётную запись.`} wide>
       <form onSubmit={submit} className="space-y-4" noValidate>
-        <RadioGroup value={mode ?? ""} onValueChange={(v) => setMode(v as OnboardingMode)} aria-label="Что сделать с admin" className="gap-3">
-          {MODES.map((m) => (
+        <RadioGroup value={mode ?? ""} onValueChange={(v) => setMode(v as OnboardingMode)} aria-label={`Что сделать с ${login}`} className="gap-3">
+          {modes(login).map((m) => (
             <Label
               key={m.id}
               htmlFor={`onb-mode-${m.id}`}
@@ -150,7 +152,7 @@ export function OnboardingPage({ state, onDone }: { state: AuthState; onDone: (c
         open={confirmSkip}
         onOpenChange={(o) => !busy && setConfirmSkip(o)}
         title="Пропустить?"
-        description="Останется вход admin с паролем из AUTH_PASSWORD. Свою учётную запись можно создать позже в настройках, на вкладке «Пользователи»."
+        description={`Останется вход ${login} с текущим паролем. Логин и пароль можно сменить позже в профиле.`}
         confirmLabel="Пропустить"
         pending={busy}
         onConfirm={() => void skip()}

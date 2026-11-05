@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/misc";
 import { lockedHint, P, type AuthErrors, type ProviderForm } from "@/pages/settings/auth/logic";
+import { providerSetupLinks, SETUP_STEPS } from "@/pages/settings/auth/setupLinks";
 import { SecretInput } from "@/pages/settings/parts";
 
 export type TestState =
@@ -56,6 +57,8 @@ export function ProviderSection({
   const secretSet = sp.clientSecretSet.value;
   const testing = test.status === "starting" || test.status === "waiting";
   const t = TITLES[id];
+  const links = providerSetupLinks(id, sp.redirectUrl);
+  const steps = SETUP_STEPS[id];
 
   const text = (f: "clientId" | "issuer" | "providerName" | "scopes" | "allowedGroups" | "groupsClaim", extra: React.ComponentProps<typeof Input> = {}) => ({
     id: `auth-${id}-${f}`,
@@ -84,6 +87,27 @@ export function ProviderSection({
         {enabled && !verified && <Badge variant="secondary">не проверен</Badge>}
       </div>
       <p className="-mt-2 text-xs text-muted-foreground">{t.description}</p>
+
+      {links.length > 0 && (
+        <div className="space-y-2 rounded-md bg-muted/50 p-3 text-sm">
+          <div className="flex flex-wrap gap-2">
+            {links.map((l) => (
+              <Button key={l.href} asChild variant="outline" size="sm">
+                <a href={l.href} target="_blank" rel="noopener noreferrer">
+                  {l.label} <ExternalLink />
+                </a>
+              </Button>
+            ))}
+          </div>
+          {steps && (
+            <ol className="list-decimal space-y-1 pl-5 text-xs text-muted-foreground">
+              {steps.map((s) => (
+                <li key={s}>{s}</li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
 
       <Field label="Адрес возврата (Redirect URI)" hint="Укажите его в настройках клиента у провайдера.">
         <CopyField value={sp.redirectUrl} label={`Копировать адрес возврата ${t.title}`} />

@@ -2,9 +2,9 @@ apiVersion: v2
 name: jackett
 description: Jackett with jackett-ui (modern web UI with built-in login) in one pod. Stock Jackett image, no fork.
 type: application
-version: 0.4.0
+version: 0.4.1
 # Jackett version (linuxserver image tag below is derived from values).
-appVersion: "v0.24.3003"
+appVersion: "0.4.1"
 home: https://github.com/bropines/jackett-ui
 sources:
   - https://github.com/bropines/jackett-ui

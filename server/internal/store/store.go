@@ -191,7 +191,10 @@ type User struct {
 	// its password from AUTH_PASSWORD[_HASH] instead (never stored).
 	PasswordHash string `json:"passwordHash,omitempty"`
 	// Bootstrap: the initial admin whose password is AUTH_PASSWORD[_HASH].
-	Bootstrap  bool       `json:"bootstrap,omitempty"`
+	Bootstrap bool `json:"bootstrap,omitempty"`
+	// Onboard: show this user the first-login wizard on the next login
+	// (set by `jackett-ui reset-password` for admins).
+	Onboard    bool       `json:"onboard,omitempty"`
 	Disabled   bool       `json:"disabled"`
 	Identities []Identity `json:"identities"`
 	// WebAuthnID is the WebAuthn user handle (random, set with the first passkey).

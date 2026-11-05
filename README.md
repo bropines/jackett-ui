@@ -102,7 +102,7 @@ When you set up a provider in the UI, "Проверить вход" runs a test 
 docker exec -it jackett jackett-ui reset-password admin --enable-password-login
 ```
 
-In Kubernetes: `kubectl exec -it deploy/jackett -c ui -- /jackett-ui reset-password admin`. The heavy option is `AUTH_RESET=1`: it deletes all users and login settings (not Jackett's), so remove it right after.
+In Kubernetes: `kubectl exec -it deploy/jackett -c ui -- /jackett-ui reset-password admin`. For an admin, the first-login wizard opens on the next login, so you can rename the account and set your own password (`--no-wizard` skips it). The heavy option is `AUTH_RESET=1`: it deletes all users and login settings (not Jackett's), so remove it right after.
 
 Clients that use the Jackett API key (qBittorrent's search plugin, Sonarr/Radarr, Torznab feeds, `.torrent` download links) keep working without a login: those URLs carry the key (or a personal API token).
 

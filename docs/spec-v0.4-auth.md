@@ -92,6 +92,8 @@ Library: `github.com/go-webauthn/webauthn`. Discoverable credentials (resident k
 - Prints what it did and exits.
 - It writes `DATA_DIR/jackett-ui.json` through the store. A running server notices the file change (the store re-reads the file when its mtime/size changed, checked at most once per second on `Get`), so no restart is needed.
 
+For an admin it also sets `users[].onboard`: the first-login wizard opens on the next login (any admin with `onboard`, not only the bootstrap user; finishing or skipping clears it). `--no-wizard` skips that. v0.4.1: `PATCH /me` and `PATCH /users/{id}` accept `username` (rename; sessions, identities and tokens stay).
+
 Usage: `docker exec <container> jackett-ui reset-password admin` / `kubectl exec deploy/jackett -c ui -- jackett-ui reset-password admin`.
 
 ## 6. Frontend

@@ -214,20 +214,23 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
 
 export function EditUserDialog({ user, onOpenChange }: { user: UserEntry | null; onOpenChange: (open: boolean) => void }) {
   const qc = useQueryClient();
+  const [login, setLogin] = useState("");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [touched, setTouched] = useState(false);
   const [forUser, setForUser] = useState<string | undefined>();
   if (user && user.id !== forUser) {
     setForUser(user.id);
+    setLogin(user.username);
     setName(user.name ?? "");
     setEmail(user.email ?? "");
   }
+  const loginDirty = !!user && login.trim().toLowerCase() !== user.username;
   const nameDirty = !!user && name.trim() !== (user.name ?? "");
   const emailDirty = !!user && normalizeEmail(email) !== (user.email ?? "");
   const save = useMutation({
     mutationFn: () =>
-      serverApi.updateUser(user!.id, { ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
+      serverApi.updateUser(user!.id, { ...(loginDirty ? { username: login.trim().toLowerCase() } : {}), ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.users });
       void qc.invalidateQueries({ queryKey: qk.authState });
@@ -236,6 +239,9 @@ export function EditUserDialog({ user, onOpenChange }: { user: UserEntry | null;
   });
   const emailErr = emailError(email);
   const serverEmailErr = emailServerError(save.error);
+  const loginErr = loginDirty ? usernameError(login) : undefined;
+  const serverLoginErr = save.error instanceof ApiError && save.error.field === "username" ? errText(save.error) : undefined;
+  const dirty = loginDirty || nameDirty || emailDirty;
 
   function close(o: boolean) {
     onOpenChange(o);
@@ -249,7 +255,7 @@ export function EditUserDialog({ user, onOpenChange }: { user: UserEntry | null;
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setTouched(true);
-    if (emailErr || save.isPending || !(nameDirty || emailDirty)) return;
+    if (emailErr || loginErr || save.isPending || !dirty) return;
     save.mutate();
   };
 
@@ -258,21 +264,33 @@ export function EditUserDialog({ user, onOpenChange }: { user: UserEntry | null;
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Изменить: {user?.username}</DialogTitle>
-          <DialogDescription>Имя и почта. Почта нужна только для справки.</DialogDescription>
+          <DialogDescription>Логин, имя и почта. Почта нужна только для справки.</DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4" noValidate>
+          <Field label="Логин" htmlFor="edit-login" error={(touched ? loginErr : undefined) ?? serverLoginErr}>
+            <Input
+              id="edit-login"
+              value={login}
+              onChange={(e) => setLogin(e.target.value)}
+              maxLength={32}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              aria-invalid={(touched && !!loginErr) || !!serverLoginErr || undefined}
+            />
+          </Field>
           <Field label="Имя" htmlFor="edit-name">
             <Input id="edit-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="off" />
           </Field>
           <Field label="Почта" htmlFor="edit-email" error={(touched ? emailErr : undefined) ?? serverEmailErr} hint="Пусто — удалить">
             <EmailInput id="edit-email" value={email} onChange={setEmail} invalid={(touched && !!emailErr) || !!serverEmailErr} />
           </Field>
-          <FormError>{save.isError && !serverEmailErr ? errText(save.error) : null}</FormError>
+          <FormError>{save.isError && !serverEmailErr && !serverLoginErr ? errText(save.error) : null}</FormError>
           <DialogFooter className="gap-2">
             <Button type="button" variant="outline" onClick={() => close(false)}>
               Отмена
             </Button>
-            <Button type="submit" disabled={save.isPending || !(nameDirty || emailDirty)}>
+            <Button type="submit" disabled={save.isPending || !dirty}>
               {save.isPending && <Loader2 className="animate-spin" />} Сохранить
             </Button>
           </DialogFooter>

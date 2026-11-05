@@ -16,11 +16,13 @@ import (
 	"github.com/bropines/jackett-ui/server/internal/users"
 )
 
-const resetUsage = `usage: jackett-ui reset-password <username> [--enable-password-login]
+const resetUsage = `usage: jackett-ui reset-password <username> [--enable-password-login] [--no-wizard]
 
 Sets a new password for the user (read from stdin: the first line, or two
 prompts on a terminal), enables the user and ends its sessions. With
 --enable-password-login the password login method is switched on as well.
+For an admin the first-login wizard opens on the next login (rename the
+account, set an own password); --no-wizard skips that.
 A running server picks the change up by itself.`
 
 // passwordReader returns the new password.
@@ -60,11 +62,13 @@ func stdinPassword(in *os.File, out io.Writer) passwordReader {
 // resetPassword implements `jackett-ui reset-password`.
 func resetPassword(args []string, lookup func(string) (string, bool), readPW passwordReader, out io.Writer) error {
 	var name string
-	enableLogin := false
+	enableLogin, noWizard := false, false
 	for _, a := range args {
 		switch {
 		case a == "--enable-password-login":
 			enableLogin = true
+		case a == "--no-wizard":
+			noWizard = true
 		case a == "-h" || a == "--help":
 			fmt.Fprintln(out, resetUsage)
 			return nil
@@ -109,8 +113,10 @@ func resetPassword(args []string, lookup func(string) (string, bool), readPW pas
 		u.PasswordHash, u.Bootstrap, u.Disabled = hash, false, false
 		u.Epoch++
 		if u.Role == store.RoleAdmin {
-			// The initial admin is now an ordinary account.
+			// The initial admin is now an ordinary account (so a restart doesn't
+			// hand it the env password again); the wizard opens on the next login.
 			s.Onboarded = true
+			u.Onboard = !noWizard
 		}
 		if enableLogin {
 			s.Auth.Methods.Password = true
@@ -122,6 +128,9 @@ func resetPassword(args []string, lookup func(string) (string, bool), readPW pas
 		return err
 	}
 	fmt.Fprintf(out, "Password of %q changed, the user is enabled and its sessions ended.\n", name)
+	if cur := st.Get(); users.ByUsername(&cur, name).Onboard {
+		fmt.Fprintln(out, "The first-login wizard opens on the next login.")
+	}
 	if enableLogin {
 		fmt.Fprintln(out, "Password login is switched on.")
 	} else if cur := st.Get(); !cur.Auth.Methods.Password && env.Methods == nil {

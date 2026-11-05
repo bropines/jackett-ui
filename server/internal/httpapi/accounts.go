@@ -117,8 +117,9 @@ func (s *Server) handleMePatch(w http.ResponseWriter, r *http.Request, re *reqEn
 		return
 	}
 	var body struct {
-		Name  opt[string] `json:"name"`
-		Email opt[string] `json:"email"`
+		Username opt[string] `json:"username"`
+		Name     opt[string] `json:"name"`
+		Email    opt[string] `json:"email"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
@@ -134,11 +135,21 @@ func (s *Server) handleMePatch(w http.ResponseWriter, r *http.Request, re *reqEn
 		writeAPIError(w, err)
 		return
 	}
-	if body.Name.Set || body.Email.Set {
+	login, err := optUsername(body.Username)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if body.Name.Set || body.Email.Set || login != "" {
+		var old string
 		err := s.store.Update(func(st *store.Settings) error {
 			u := st.User(pr.user.ID)
 			if u == nil {
 				return errUserNotFound
+			}
+			old = u.Username
+			if err := renameUser(st, u, login); err != nil {
+				return err
 			}
 			if body.Name.Set {
 				u.Name = name
@@ -155,8 +166,32 @@ func (s *Server) handleMePatch(w http.ResponseWriter, r *http.Request, re *reqEn
 			writeAPIError(w, err)
 			return
 		}
+		if login != "" && login != old {
+			s.log.Warn("user renamed", "from", old, "to", login, "by", login)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// optUsername validates an optional new login ("" when not set).
+func optUsername(v opt[string]) (string, error) {
+	if !v.Set || v.Null {
+		return "", nil
+	}
+	return usernameArg(v.V, "", "username")
+}
+
+// renameUser changes u's login to name ("" or the same name: nothing to do).
+// Sessions, identities and tokens point to the user id, so they stay valid.
+func renameUser(st *store.Settings, u *store.User, name string) error {
+	if name == "" || name == u.Username {
+		return nil
+	}
+	if other := users.ByUsername(st, name); other != nil && other.ID != u.ID {
+		return errUsernameTaken
+	}
+	u.Username = name
+	return nil
 }
 
 func (s *Server) handleMePassword(w http.ResponseWriter, r *http.Request, re *reqEnv, pr *principal) {
@@ -435,6 +470,7 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request, re *re
 
 func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *reqEnv, pr *principal, id string) {
 	var body struct {
+		Username opt[string] `json:"username"`
 		Name     opt[string] `json:"name"`
 		Role     opt[string] `json:"role"`
 		Email    opt[string] `json:"email"`
@@ -471,11 +507,21 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 			return
 		}
 	}
+	login, err := optUsername(body.Username)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	var nu store.User
+	var oldName string
 	err = s.store.Update(func(st *store.Settings) error {
 		u := st.User(id)
 		if u == nil {
 			return errUserNotFound
+		}
+		oldName = u.Username
+		if err := renameUser(st, u, login); err != nil {
+			return err
 		}
 		bump := false
 		if body.Name.Set {
@@ -511,6 +557,9 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 	if err != nil {
 		writeAPIError(w, err)
 		return
+	}
+	if oldName != nu.Username {
+		s.log.Warn("user renamed", "from", oldName, "to", nu.Username, "by", pr.name())
 	}
 	s.log.Warn("user changed", "user", nu.Username, "role", nu.Role, "disabled", nu.Disabled, "by", pr.name())
 	if id == pr.uid() && pr.via == viaSession {

@@ -105,6 +105,8 @@ export interface UserCreate {
 }
 
 export interface UserPatch {
+  /** New login (lower case). */
+  username?: string;
   name?: string;
   /** "" clears it. */
   email?: string;
@@ -349,7 +351,7 @@ export const serverApi = {
   /* ── Me ── */
 
   me: () => protectedCall<Me>("/me"),
-  updateMe: (patch: { name?: string; email?: string }) => protectedCall<void>("/me", body("PATCH", patch)),
+  updateMe: (patch: { username?: string; name?: string; email?: string }) => protectedCall<void>("/me", body("PATCH", patch)),
   changeMyPassword: (data: { current?: string; new: string }) => protectedCall<void>("/me/password", body("POST", data)),
   unlinkMyIdentity: (provider: ProviderId) => protectedCall<void>(`/me/identities/${enc(provider)}`, del),
   createMyToken: (data: { name: string; expiresInDays?: number }) => protectedCall<CreatedToken>("/me/tokens", body("POST", data)),

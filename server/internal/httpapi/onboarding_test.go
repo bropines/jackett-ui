@@ -156,3 +156,29 @@ func TestEmail(t *testing.T) {
 	// Keeping your own e-mail is not a conflict.
 	h.expect(h.do("PATCH", "/_ui/api/me", map[string]any{"email": "a@b.io"}), http.StatusNoContent)
 }
+
+// An admin flagged by `reset-password` (Onboard) gets the wizard even after
+// the initial setup; replace renames it and clears the flag. Non-admins don't.
+func TestOnboardingAfterReset(t *testing.T) {
+	h := newHarness(t, harnessOpt{})
+	h.setup()
+	vid := h.createUser("vv", "viewer", "viewer-password")
+	_ = h.store.Update(func(s *store.Settings) error {
+		s.User(h.userByName("admin").ID).Onboard = true
+		s.User(vid).Onboard = true
+		return nil
+	})
+	v := h.as("vv", "viewer-password")
+	if v.state().Onboarding {
+		t.Fatal("viewer got the wizard")
+	}
+	if !h.state().Onboarding {
+		t.Fatal("no wizard after reset")
+	}
+	h.expect(h.do("POST", "/_ui/api/onboarding", map[string]any{"mode": "replace", "username": "bropines", "password": "brand-new-pass"}), http.StatusNoContent)
+	st := h.state()
+	if st.Onboarding || st.User == nil || st.User.Username != "bropines" || h.userByName("bropines").Onboard {
+		t.Fatalf("after replace: %+v", st.User)
+	}
+	h.clone().expect(h.clone().loginAs("bropines", "brand-new-pass"), http.StatusNoContent)
+}
