@@ -166,3 +166,68 @@ func TestOpenErrors(t *testing.T) {
 		t.Fatal("want error for empty dir")
 	}
 }
+
+func TestMigrateV2(t *testing.T) {
+	dir := t.TempDir()
+	orig := `{"version":2,"sessionKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","authEpoch":3,"auth":{"methods":{"password":true,"oidc":true}},"users":[{"id":"u_1","username":"admin","role":"admin","epoch":1}]}`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.Get()
+	if st.Migrated != 2 || s.Version != CurrentVersion || s.Auth.Methods != (Methods{Password: true, OIDC: true, Passkey: true}) || len(s.Users) != 1 || s.AuthEpoch != 3 || s.Onboarded {
+		t.Fatalf("migrated: %d %+v", st.Migrated, s)
+	}
+	if bak, err := os.ReadFile(filepath.Join(dir, BackupV2Name)); err != nil || string(bak) != orig {
+		t.Fatalf("backup: %v", err)
+	}
+	if st2, err := Open(dir); err != nil || st2.Migrated != 0 {
+		t.Fatalf("reopen: %v", err)
+	}
+}
+
+func TestReloadOnExternalChange(t *testing.T) {
+	dir := t.TempDir()
+	a, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another process (the reset-password command) writes the file.
+	b, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Update(func(s *Settings) error { s.PublicURL = "https://other"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// An Update in the first process must not overwrite it.
+	if err := a.Update(func(s *Settings) error { s.SessionTTL = "1h"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if s := a.Get(); s.PublicURL != "https://other" || s.SessionTTL != "1h" {
+		t.Fatalf("update over external change: %+v", s)
+	}
+	// Get notices outside changes too (after the check interval).
+	if err := b.Update(func(s *Settings) error { s.PublicURL = "https://third-one"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.checked = time.Time{}
+	a.mu.Unlock()
+	if s := a.Get(); s.PublicURL != "https://third-one" {
+		t.Fatalf("get after external change: %q", s.PublicURL)
+	}
+	// Garbage in the file is ignored.
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.checked = time.Time{}
+	a.mu.Unlock()
+	if s := a.Get(); s.PublicURL != "https://third-one" {
+		t.Fatal("broken file replaced the settings")
+	}
+}

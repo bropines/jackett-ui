@@ -2,6 +2,9 @@ import type { AuthState, ProviderId, Role } from "@/api/server";
 
 export const MIN_PASSWORD = 8;
 
+/** The login methods page, where the setup page and the first-login wizard continue. */
+export const WELCOME_PATH = "/welcome?step=methods";
+
 /** Default button names; the server sends the actual ones in `auth/state`. */
 export const PROVIDER_NAMES: Record<ProviderId, string> = { oidc: "SSO", google: "Google", github: "GitHub" };
 
@@ -116,3 +119,16 @@ export function displayName(s: AuthState | undefined): string {
   if (s.user) return s.user.name || s.user.username;
   return s.disabled ? "гость" : "";
 }
+
+export const EMAIL_MAX = 254;
+
+/** Optional e-mail: empty is fine; otherwise ≤254 chars, an "@" and no spaces (the server's rule). */
+export function emailError(v: string): string | undefined {
+  const e = v.trim();
+  if (!e) return undefined;
+  if (e.length > EMAIL_MAX || /\s/.test(e) || !/^[^@]+@[^@]+$/.test(e)) return "Адрес вида name@example.com";
+  return undefined;
+}
+
+/** E-mail as the server stores it: trimmed, lower-cased. */
+export const normalizeEmail = (v: string) => v.trim().toLowerCase();

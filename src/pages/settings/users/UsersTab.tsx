@@ -2,10 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
   CheckCircle2,
+  Fingerprint,
   KeyRound,
   LogOut,
   MailPlus,
   MoreVertical,
+  Pencil,
   Shield,
   Trash2,
   Unlink,
@@ -37,7 +39,7 @@ import { PROVIDER_NAMES } from "@/lib/auth";
 import { authStateQuery } from "@/lib/auth-query";
 import { formatDateTime, plural } from "@/lib/format";
 import { useMediaQuery } from "@/pages/search/useMediaQuery";
-import { CreateUserDialog, InviteDialog, ResetPasswordDialog, RoleDialog, UserTokensDialog } from "@/pages/settings/users/dialogs";
+import { CreateUserDialog, EditUserDialog, InviteDialog, ResetPasswordDialog, RoleDialog, UserTokensDialog } from "@/pages/settings/users/dialogs";
 import { sortUsers } from "@/pages/settings/users/logic";
 
 type Pending =
@@ -46,10 +48,19 @@ type Pending =
   | { kind: "disable"; user: UserEntry }
   | null;
 
-function Identities({ items }: { items: Identity[] }) {
-  if (!items.length) return <span className="text-muted-foreground">—</span>;
+function Identities({ items, passkeys = 0 }: { items: Identity[]; passkeys?: number }) {
+  if (!items.length && !passkeys) return <span className="text-muted-foreground">—</span>;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
+      {passkeys > 0 && (
+        <span title={`Passkey: ${passkeys}`} className="inline-flex items-center gap-0.5 text-muted-foreground">
+          <Fingerprint className="h-4 w-4" aria-hidden />
+          <span className="text-xs tabular-nums" aria-hidden>
+            {passkeys}
+          </span>
+          <span className="sr-only">Passkey: {passkeys}</span>
+        </span>
+      )}
       {items.map((i) => (
         <span key={`${i.provider}:${i.label}`} title={`${PROVIDER_NAMES[i.provider] ?? i.provider}: ${i.label}`} className="inline-flex text-muted-foreground">
           <ProviderIcon id={i.provider} className="h-4 w-4" />
@@ -65,6 +76,7 @@ function Identities({ items }: { items: Identity[] }) {
 function UserActions({
   user,
   isSelf,
+  onEdit,
   onRole,
   onPassword,
   onTokens,
@@ -75,6 +87,7 @@ function UserActions({
 }: {
   user: UserEntry;
   isSelf: boolean;
+  onEdit: () => void;
   onRole: () => void;
   onPassword: () => void;
   onTokens: () => void;
@@ -91,6 +104,9 @@ function UserActions({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuItem onSelect={onEdit}>
+          <Pencil /> Имя и почта
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onRole}>
           <Shield /> Изменить роль
         </DropdownMenuItem>
@@ -172,6 +188,7 @@ export function UsersTab() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [roleFor, setRoleFor] = useState<UserEntry | null>(null);
+  const [editFor, setEditFor] = useState<UserEntry | null>(null);
   const [passwordFor, setPasswordFor] = useState<UserEntry | null>(null);
   const [tokensFor, setTokensFor] = useState<UserEntry | null>(null);
   const [pending, setPending] = useState<Pending>(null);
@@ -231,6 +248,7 @@ export function UsersTab() {
     <UserActions
       user={u}
       isSelf={u.id === selfId}
+      onEdit={() => setEditFor(u)}
       onRole={() => setRoleFor(u)}
       onPassword={() => setPasswordFor(u)}
       onTokens={() => setTokensFor(u)}
@@ -247,8 +265,14 @@ export function UsersTab() {
         <span className="truncate font-medium">{u.name || u.username}</span>
         {u.id === selfId && <span className="text-xs text-muted-foreground">(вы)</span>}
         {u.disabled && <Badge variant="outline">отключён</Badge>}
+        {u.bootstrap && (
+          <Badge variant="secondary" title="Пароль этого пользователя задан переменной окружения AUTH_PASSWORD">
+            из AUTH_PASSWORD
+          </Badge>
+        )}
       </div>
       <div className="truncate font-mono text-xs text-muted-foreground">{u.username}</div>
+      {u.email && <div className="truncate text-xs text-muted-foreground">{u.email}</div>}
     </div>
   );
 
@@ -287,7 +311,7 @@ export function UsersTab() {
                   <RoleBadge role={u.role} />
                 </TableCell>
                 <TableCell>
-                  <Identities items={u.identities} />
+                  <Identities items={u.identities} passkeys={u.passkeyCount ?? 0} />
                 </TableCell>
                 <TableCell className="tabular-nums">{u.tokenCount ?? 0}</TableCell>
                 <TableCell>
@@ -310,7 +334,7 @@ export function UsersTab() {
                 {nameCell(u)}
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                   <RoleBadge role={u.role} />
-                  <Identities items={u.identities} />
+                  <Identities items={u.identities} passkeys={u.passkeyCount ?? 0} />
                   <span>
                     {u.tokenCount ?? 0} {plural(u.tokenCount ?? 0, ["токен", "токена", "токенов"])}
                   </span>
@@ -359,6 +383,7 @@ export function UsersTab() {
 
       <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
       <CreateUserDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <EditUserDialog user={editFor} onOpenChange={(o) => !o && setEditFor(null)} />
       <RoleDialog
         user={roleFor}
         onOpenChange={(o) => !o && setRoleFor(null)}

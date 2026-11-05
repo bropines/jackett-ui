@@ -33,7 +33,10 @@ type userView struct {
 	ID             string         `json:"id"`
 	Username       string         `json:"username"`
 	Name           string         `json:"name"`
+	Email          string         `json:"email"`
 	Role           string         `json:"role"`
+	Bootstrap      bool           `json:"bootstrap"`
+	PasskeyCount   int            `json:"passkeyCount"`
 	Disabled       bool           `json:"disabled"`
 	PasswordSet    bool           `json:"passwordSet"`
 	PasswordLocked bool           `json:"passwordLocked"`
@@ -52,9 +55,10 @@ func identitiesView(u *store.User) []identityView {
 }
 
 func userViewOf(eff config.Effective, st *store.Settings, u *store.User) userView {
-	locked := u.Username == store.AdminUsername && eff.AdminPassword.Value != ""
+	locked := envPassword(eff, u)
 	return userView{
-		ID: u.ID, Username: u.Username, Name: u.Name, Role: u.Role, Disabled: u.Disabled,
+		ID: u.ID, Username: u.Username, Name: u.Name, Email: u.Email, Role: u.Role, Disabled: u.Disabled,
+		Bootstrap: u.Bootstrap, PasskeyCount: len(u.Passkeys),
 		PasswordSet: passwordHashOf(eff, u) != "", PasswordLocked: locked,
 		Identities: identitiesView(u), TokenCount: users.TokenCount(st, u.ID),
 		CreatedAt: u.CreatedAt, LastLoginAt: u.LastLoginAt,
@@ -113,24 +117,38 @@ func (s *Server) handleMePatch(w http.ResponseWriter, r *http.Request, re *reqEn
 		return
 	}
 	var body struct {
-		Name opt[string] `json:"name"`
+		Name  opt[string] `json:"name"`
+		Email opt[string] `json:"email"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	if body.Name.Set {
-		name := strings.TrimSpace(body.Name.V)
-		if !users.ValidName(name) {
-			writeAPIError(w, badField("name", "Недопустимое имя"))
-			return
-		}
+	name := strings.TrimSpace(body.Name.V)
+	if body.Name.Set && !users.ValidName(name) {
+		writeAPIError(w, badField("name", "Недопустимое имя"))
+		return
+	}
+	email, err := emailArg(body.Email.V, "email")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if body.Name.Set || body.Email.Set {
 		err := s.store.Update(func(st *store.Settings) error {
 			u := st.User(pr.user.ID)
 			if u == nil {
 				return errUserNotFound
 			}
-			u.Name = name
+			if body.Name.Set {
+				u.Name = name
+			}
+			if body.Email.Set {
+				if emailTaken(st, email, u.ID) {
+					return errEmailTaken
+				}
+				u.Email = email
+			}
 			return nil
 		})
 		if err != nil {
@@ -155,7 +173,7 @@ func (s *Server) handleMePassword(w http.ResponseWriter, r *http.Request, re *re
 		return
 	}
 	u := re.st.User(pr.user.ID)
-	if u.Username == store.AdminUsername && re.eff.AdminPassword.Value != "" {
+	if envPassword(re.eff, u) {
 		writeAPIError(w, lockedErr("new", re.eff.AdminPassword.Env))
 		return
 	}
@@ -355,6 +373,7 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request, re *re
 	var body struct {
 		Username string `json:"username"`
 		Name     string `json:"name"`
+		Email    string `json:"email"`
 		Role     string `json:"role"`
 		Password string `json:"password"`
 	}
@@ -363,6 +382,11 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request, re *re
 		return
 	}
 	name, err := usernameArg(body.Username, "", "username")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	email, err := emailArg(body.Email, "email")
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -392,7 +416,11 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request, re *re
 		if users.ByUsername(st, name) != nil {
 			return errUsernameTaken
 		}
+		if emailTaken(st, email, "") {
+			return errEmailTaken
+		}
 		u = newUser(name, display, role, hash, s.now())
+		u.Email = email
 		st.Users = append(st.Users, u)
 		return nil
 	})
@@ -409,6 +437,7 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 	var body struct {
 		Name     opt[string] `json:"name"`
 		Role     opt[string] `json:"role"`
+		Email    opt[string] `json:"email"`
 		Disabled opt[bool]   `json:"disabled"`
 		Password opt[string] `json:"password"`
 	}
@@ -431,6 +460,11 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 			return
 		}
 	}
+	email, err := emailArg(body.Email.V, "email")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	if body.Password.Set && !body.Password.Null {
 		if hash, err = auth.HashPassword(body.Password.V); err != nil {
 			writeAPIError(w, passwordAPIError(err, "password"))
@@ -447,6 +481,12 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 		if body.Name.Set {
 			u.Name = name
 		}
+		if body.Email.Set {
+			if emailTaken(st, email, u.ID) {
+				return errEmailTaken
+			}
+			u.Email = email
+		}
 		if body.Role.Set && role != u.Role {
 			u.Role, bump = role, true
 		}
@@ -454,7 +494,7 @@ func (s *Server) handleUserPatch(w http.ResponseWriter, r *http.Request, re *req
 			u.Disabled, bump = body.Disabled.V, true
 		}
 		if body.Password.Set {
-			if u.Username == store.AdminUsername && re.eff.AdminPassword.Value != "" {
+			if envPassword(re.eff, u) {
 				return lockedErr("password", re.eff.AdminPassword.Env)
 			}
 			u.PasswordHash, bump = hash, true // null clears the password
@@ -491,8 +531,9 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request, re *re
 		if u == nil {
 			return errUserNotFound
 		}
-		if u.Username == store.AdminUsername && re.eff.AdminPassword.Value != "" {
-			return lockedErr("", re.eff.AdminPassword.Env)
+		// Without the initial admin the env password has nobody to log in.
+		if u.Bootstrap {
+			st.Onboarded = true
 		}
 		name = u.Username
 		users.DeleteTokensOf(st, id)

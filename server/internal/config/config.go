@@ -180,7 +180,7 @@ func ParseEnv(lookup Lookup) (*Env, error) {
 		for _, id := range SplitList(strings.ToLower(v)) {
 			p := m.Ptr(id)
 			if p == nil {
-				fail("AUTH_METHODS: %q is not one of password, oidc, google, github, header", id)
+				fail("AUTH_METHODS: %q is not one of password, passkey, oidc, google, github, header", id)
 				continue
 			}
 			*p = true

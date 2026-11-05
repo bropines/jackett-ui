@@ -30,7 +30,10 @@ const FileName = "jackett-ui.json"
 const BackupV1Name = FileName + ".v1.bak"
 
 // CurrentVersion is the settings file format version.
-const CurrentVersion = 2
+const CurrentVersion = 3
+
+// BackupV2Name is the copy of a version 2 file kept by the v2 → v3 migration.
+const BackupV2Name = FileName + ".v2.bak"
 
 // SessionKeySize is the size of the HMAC key for sessions.
 const SessionKeySize = 32
@@ -53,6 +56,9 @@ type Settings struct {
 	PublicURL  string `json:"publicUrl,omitempty"`
 	SessionTTL string `json:"sessionTtl,omitempty"`
 
+	// Onboarded: the first-login wizard was finished or skipped (v0.4).
+	Onboarded bool `json:"onboarded,omitempty"`
+
 	Users   []User   `json:"users"`
 	Tokens  []Token  `json:"tokens"`
 	Invites []Invite `json:"invites"`
@@ -65,9 +71,10 @@ type Methods struct {
 	Google   bool `json:"google"`
 	GitHub   bool `json:"github"`
 	Header   bool `json:"header"`
+	Passkey  bool `json:"passkey"`
 }
 
-// Get returns the switch for method id (password, oidc, google, github, header).
+// Get returns the switch for method id (password, oidc, google, github, header, passkey).
 func (m Methods) Get(id string) bool {
 	switch id {
 	case "password":
@@ -80,6 +87,8 @@ func (m Methods) Get(id string) bool {
 		return m.GitHub
 	case "header":
 		return m.Header
+	case "passkey":
+		return m.Passkey
 	}
 	return false
 }
@@ -97,6 +106,8 @@ func (m *Methods) Ptr(id string) *bool {
 		return &m.GitHub
 	case "header":
 		return &m.Header
+	case "passkey":
+		return &m.Passkey
 	}
 	return nil
 }
@@ -174,11 +185,18 @@ type User struct {
 	Username string `json:"username"` // lower-case, unique
 	Name     string `json:"name"`
 	Role     string `json:"role"`
-	// PasswordHash is bcrypt; "" = no password. The user "admin" may get
+	// Email is optional, lower-case, unique when set.
+	Email string `json:"email,omitempty"`
+	// PasswordHash is bcrypt; "" = no password. The Bootstrap user gets
 	// its password from AUTH_PASSWORD[_HASH] instead (never stored).
-	PasswordHash string     `json:"passwordHash,omitempty"`
-	Disabled     bool       `json:"disabled"`
-	Identities   []Identity `json:"identities"`
+	PasswordHash string `json:"passwordHash,omitempty"`
+	// Bootstrap: the initial admin whose password is AUTH_PASSWORD[_HASH].
+	Bootstrap  bool       `json:"bootstrap,omitempty"`
+	Disabled   bool       `json:"disabled"`
+	Identities []Identity `json:"identities"`
+	// WebAuthnID is the WebAuthn user handle (random, set with the first passkey).
+	WebAuthnID []byte    `json:"webauthnId,omitempty"`
+	Passkeys   []Passkey `json:"passkeys,omitempty"`
 	// Epoch is bumped on password change, role change, disable and
 	// "log out everywhere"; sessions carry it.
 	Epoch       uint64     `json:"epoch"`
@@ -194,6 +212,24 @@ type Identity struct {
 	Subject  string    `json:"subject"`
 	Label    string    `json:"label"`
 	LinkedAt time.Time `json:"linkedAt"`
+}
+
+// Passkey is a WebAuthn credential of a user.
+type Passkey struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	CredentialID    []byte     `json:"credentialId"`
+	PublicKey       []byte     `json:"publicKey"`
+	AttestationType string     `json:"attestationType,omitempty"`
+	AAGUID          []byte     `json:"aaguid,omitempty"`
+	SignCount       uint32     `json:"signCount"`
+	Transports      []string   `json:"transports,omitempty"`
+	Attachment      string     `json:"attachment,omitempty"`
+	BackupEligible  bool       `json:"backupEligible,omitempty"`
+	BackupState     bool       `json:"backupState,omitempty"`
+	CloneWarning    bool       `json:"cloneWarning,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	LastUsedAt      *time.Time `json:"lastUsedAt,omitempty"`
 }
 
 // Token is a personal API token (stored hashed).
@@ -244,6 +280,19 @@ func (s Settings) Clone() Settings {
 		for i, u := range s.Users {
 			u.Identities = slices.Clone(u.Identities)
 			u.LastLoginAt = cloneTime(u.LastLoginAt)
+			u.WebAuthnID = slices.Clone(u.WebAuthnID)
+			if u.Passkeys != nil {
+				pks := make([]Passkey, len(u.Passkeys))
+				for j, p := range u.Passkeys {
+					p.CredentialID = slices.Clone(p.CredentialID)
+					p.PublicKey = slices.Clone(p.PublicKey)
+					p.AAGUID = slices.Clone(p.AAGUID)
+					p.Transports = slices.Clone(p.Transports)
+					p.LastUsedAt = cloneTime(p.LastUsedAt)
+					pks[j] = p
+				}
+				u.Passkeys = pks
+			}
 			c.Users[i] = u
 		}
 	}
@@ -274,7 +323,7 @@ func Defaults() Settings {
 	return Settings{
 		Version: CurrentVersion,
 		Auth: Auth{
-			Methods:       Methods{Password: true},
+			Methods:       Methods{Password: true, Passkey: true},
 			AutoProvision: AutoProvision{Enabled: true, Role: RoleViewer},
 		},
 	}
@@ -289,6 +338,11 @@ type Store struct {
 	wmu sync.Mutex
 	// Migrated is the version the file was migrated from on Open (0 = none).
 	Migrated int
+	// modTime/size: the file as this process last wrote or read it;
+	// checked: when Get last looked (all guarded by mu).
+	modTime time.Time
+	size    int64
+	checked time.Time
 }
 
 // Open loads DATA_DIR/jackett-ui.json, creating it (and a session key) when
@@ -331,8 +385,19 @@ func Open(dir string) (*Store, error) {
 			if err := WriteFileAtomic(filepath.Join(dir, BackupV1Name), data); err != nil {
 				return nil, err
 			}
+			migrateV2(&cur)
 			st.cur = cur
 			st.Migrated = max(head.Version, 1)
+			changed = true
+		case head.Version == 2:
+			if err := json.Unmarshal(data, &st.cur); err != nil {
+				return nil, fmt.Errorf("store: parse %s: %w", st.path, err)
+			}
+			if err := WriteFileAtomic(filepath.Join(dir, BackupV2Name), data); err != nil {
+				return nil, err
+			}
+			migrateV2(&st.cur)
+			st.Migrated = 2
 			changed = true
 		default:
 			if err := json.Unmarshal(data, &st.cur); err != nil {
@@ -356,18 +421,72 @@ func Open(dir string) (*Store, error) {
 		if err := st.write(st.cur); err != nil {
 			return nil, err
 		}
+	} else {
+		st.remember()
 	}
 	return st, nil
+}
+
+// migrateV2 converts version 2 settings to version 3: passkeys are a new
+// login method, on by default.
+func migrateV2(s *Settings) {
+	s.Auth.Methods.Passkey = true
 }
 
 // Path returns the settings file path.
 func (s *Store) Path() string { return s.path }
 
-// Get returns a deep copy of the current settings.
+// externalCheckEvery limits how often Get looks for outside changes.
+const externalCheckEvery = time.Second
+
+// Get returns a deep copy of the current settings. If another process (the
+// reset-password command) rewrote the file, it is re-read first.
 func (s *Store) Get() Settings {
+	s.reloadIfChanged(false)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cur.Clone()
+}
+
+// remember records the file's mtime and size as "ours". Callers hold s.mu
+// for writing, or are the only user of s (Open).
+func (s *Store) remember() {
+	if fi, err := os.Stat(s.path); err == nil {
+		s.modTime, s.size = fi.ModTime(), fi.Size()
+	}
+	s.checked = time.Now()
+}
+
+// reloadIfChanged re-reads the file when its mtime or size differ from what
+// this process wrote last. A file that can't be parsed is ignored (the
+// in-memory copy stays).
+func (s *Store) reloadIfChanged(force bool) {
+	s.mu.RLock()
+	due := force || time.Since(s.checked) >= externalCheckEvery
+	s.mu.RUnlock()
+	if !due {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !force && time.Since(s.checked) < externalCheckEvery {
+		return
+	}
+	s.checked = time.Now()
+	fi, err := os.Stat(s.path)
+	if err != nil || (fi.ModTime().Equal(s.modTime) && fi.Size() == s.size) {
+		return
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	var next Settings
+	if json.Unmarshal(data, &next) != nil || next.Version != CurrentVersion || len(next.SessionKey) != SessionKeySize {
+		return
+	}
+	s.cur = next
+	s.modTime, s.size = fi.ModTime(), fi.Size()
 }
 
 // Update applies fn to a copy of the settings and writes the result. If fn
@@ -375,6 +494,8 @@ func (s *Store) Get() Settings {
 func (s *Store) Update(fn func(*Settings) error) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
+	// Never overwrite a change another process just made.
+	s.reloadIfChanged(true)
 	next := s.Get()
 	if err := fn(&next); err != nil {
 		return err
@@ -385,6 +506,7 @@ func (s *Store) Update(fn func(*Settings) error) error {
 	}
 	s.mu.Lock()
 	s.cur = next
+	s.remember()
 	s.mu.Unlock()
 	return nil
 }

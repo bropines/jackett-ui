@@ -88,7 +88,7 @@ func TestSettingsGetLockedAndNoSecrets(t *testing.T) {
 	if !s.SessionTTL.Locked || s.SessionTTL.Value != "24h" || s.PublicURL.Locked {
 		t.Fatalf("misc: %+v %+v", s.SessionTTL, s.PublicURL)
 	}
-	if len(s.Auth.Methods) != 5 || s.Auth.Methods["password"].Value != true || s.Auth.Methods["oidc"].Value != false || s.Auth.Methods["header"].Locked {
+	if len(s.Auth.Methods) != 6 || s.Auth.Methods["password"].Value != true || s.Auth.Methods["oidc"].Value != false || s.Auth.Methods["header"].Locked {
 		t.Fatalf("methods: %+v", s.Auth.Methods)
 	}
 	if s.Auth.Disabled.Value != false || s.Auth.AutoProvision.Enabled.Value != true || s.Auth.AutoProvision.Role.Value != "viewer" {
@@ -179,7 +179,7 @@ func TestSettingsPutRules(t *testing.T) {
 		t.Fatalf("publicUrl normalised to %v", s.PublicURL.Value)
 	}
 	st := h.store.Get().Auth
-	if st.AutoProvision.Enabled || st.AutoProvision.Role != "editor" || len(st.AdminEmails) != 1 || st.Methods != (store.Methods{Password: true}) {
+	if st.AutoProvision.Enabled || st.AutoProvision.Role != "editor" || len(st.AdminEmails) != 1 || st.Methods != (store.Methods{Password: true, Passkey: true}) {
 		t.Fatalf("stored: %+v", st)
 	}
 	// Settings are admin-only.
@@ -260,7 +260,7 @@ func TestEnvPasswordIsLocked(t *testing.T) {
 	if w := h.do("PATCH", "/_ui/api/users/"+admin.ID, map[string]any{"password": "other-password"}); w.Code != 409 || errorCode(w) != "locked" {
 		t.Fatalf("admin reset: %d", w.Code)
 	}
-	if w := h.do("DELETE", "/_ui/api/users/"+admin.ID, nil, xhr); w.Code != 409 || errorCode(w) != "locked" {
+	if w := h.do("DELETE", "/_ui/api/users/"+admin.ID, nil, xhr); w.Code != 409 || errorCode(w) != "last_admin" {
 		t.Fatalf("delete env admin: %d", w.Code)
 	}
 	// AUTH_PASSWORD never reaches the disk.
@@ -268,7 +268,7 @@ func TestEnvPasswordIsLocked(t *testing.T) {
 		t.Fatal("env password hash written to the settings file")
 	}
 	// Restart with the same env: no second admin.
-	if err := ensureEnvAdmin(h.srv.env, h.store, h.srv.now()); err != nil || len(h.store.Get().Users) != 1 {
+	if err := ensureEnvAdmin(h.srv.env, h.store, h.srv.now(), h.srv.log); err != nil || len(h.store.Get().Users) != 1 {
 		t.Fatalf("ensure twice: %v %d", err, len(h.store.Get().Users))
 	}
 }

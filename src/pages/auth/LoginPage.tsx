@@ -1,4 +1,4 @@
-import { KeyRound, Loader2 } from "lucide-react";
+import { Fingerprint, KeyRound, Loader2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 
 import { ApiError, errText, providerStartUrl, serverApi, type AuthState } from "@/api";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authErrorText } from "@/lib/auth";
 import { currentReturnPath, useAuthErrorParam } from "@/lib/auth-hooks";
+import { getPasskey, webauthnErrorText } from "@/lib/webauthn";
 import { AuthLayout } from "@/pages/auth/AuthLayout";
 import { SecretInput } from "@/pages/settings/parts";
 
@@ -24,20 +25,55 @@ function useCountdown(until: number | null): number {
   return until ? Math.max(0, Math.ceil((until - now) / 1000)) : 0;
 }
 
+/** Russian text for a failed passkey login; null = the user cancelled (show nothing). */
+export function passkeyLoginErrorText(err: unknown): string | null {
+  const browser = webauthnErrorText(err);
+  if (browser !== undefined) return browser;
+  if (err instanceof ApiError) {
+    if (err.code === "passkey_invalid") return "Passkey не подошёл: он удалён на сервере или попытка устарела. Попробуйте ещё раз.";
+    if (err.code === "user_disabled") return "Этот пользователь отключён.";
+    if (err.code === "passkey_login_disabled") return "Вход по passkey выключен.";
+    if (err.status === 401) return "Passkey не подошёл. Попробуйте ещё раз.";
+  }
+  return errText(err);
+}
+
 export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => void }) {
   const authError = useAuthErrorParam();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeyError, setPasskeyError] = useState("");
   const [blockedUntil, setBlockedUntil] = useState<number | null>(null);
   const wait = useCountdown(blockedUntil);
   const blocked = wait > 0;
 
   const methods = state.methods ?? { password: false, providers: [], header: false };
   const providers = methods.providers ?? [];
-  const external = providers.length > 0;
+  const passkeyLogin = !!methods.passkey;
+  const external = providers.length > 0 || passkeyLogin;
   const passwordLogin = methods.password;
+
+  const block = (err: ApiError) => setBlockedUntil(Date.now() + (err.retryAfter ?? 60) * 1000);
+
+  async function loginWithPasskey() {
+    if (blocked || passkeyBusy) return;
+    setPasskeyBusy(true);
+    setPasskeyError("");
+    try {
+      const { ceremony, publicKey } = await serverApi.passkeyLoginBegin();
+      const credential = await getPasskey(publicKey);
+      await serverApi.passkeyLoginFinish({ ceremony, credential });
+      onDone();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) block(err);
+      else setPasskeyError(passkeyLoginErrorText(err) ?? "");
+    } finally {
+      setPasskeyBusy(false);
+    }
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -49,8 +85,7 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
       onDone();
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
-        const secs = err.retryAfter ?? 60;
-        setBlockedUntil(Date.now() + secs * 1000);
+        block(err);
         setError("");
       } else if (err instanceof ApiError && err.status === 401) {
         setError("Неверное имя пользователя или пароль");
@@ -72,14 +107,30 @@ export function LoginPage({ state, onDone }: { state: AuthState; onDone: () => v
 
       {external && (
         <div className="space-y-2">
+          {passkeyLogin && (
+            <Button type="button" className="w-full" variant={passwordLogin || providers.length > 0 ? "outline" : "default"} onClick={() => void loginWithPasskey()} disabled={passkeyBusy || blocked}>
+              {passkeyBusy ? <Loader2 className="animate-spin" /> : <Fingerprint />} Войти с passkey
+            </Button>
+          )}
+          {passkeyError && (
+            <p className="text-sm text-destructive" role="alert">
+              {passkeyError}
+            </p>
+          )}
           {providers.map((p) => (
-            <Button key={p.id} asChild className="w-full" variant={passwordLogin || providers.length > 1 ? "outline" : "default"}>
+            <Button key={p.id} asChild className="w-full" variant={passwordLogin || providers.length > 1 || passkeyLogin ? "outline" : "default"}>
               <a href={providerStartUrl(p.id, currentReturnPath())}>
                 <ProviderIcon id={p.id} /> Войти через {p.name}
               </a>
             </Button>
           ))}
         </div>
+      )}
+
+      {!passwordLogin && blocked && (
+        <p className="text-sm text-destructive" role="alert">
+          {rateLimitText(wait)}
+        </p>
       )}
 
       {external && passwordLogin && (

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Loader2, RotateCcw, Save, ShieldAlert, ShieldCheck, UserPlus } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -8,11 +8,9 @@ import {
   errText,
   METHOD_IDS,
   PROVIDER_IDS,
-  providerTestToken,
   qk,
   ROLES,
   serverApi,
-  waitForProviderTest,
   type MethodId,
   type ProviderId,
   type Role,
@@ -47,18 +45,18 @@ import {
   type ProviderForm,
   type TestedKeys,
 } from "@/pages/settings/auth/logic";
-import { ProviderSection, type TestState } from "@/pages/settings/auth/ProviderSection";
+import { ProviderSection } from "@/pages/settings/auth/ProviderSection";
+import { useProviderTests } from "@/pages/settings/auth/useProviderTests";
 import { Section, SwitchRow } from "@/pages/settings/parts";
 
 const METHOD_TEXT: Record<MethodId, { label: string; description: string }> = {
   password: { label: "Пароль", description: "Имя пользователя и пароль." },
+  passkey: { label: "Passkey", description: "Вход без пароля: отпечаток, Face ID, PIN или ключ безопасности. Каждый добавляет passkey в профиле." },
   oidc: { label: "OpenID Connect", description: "Свой провайдер: Authentik, Keycloak, Authelia…" },
   google: { label: "Google", description: "Аккаунт Google." },
   github: { label: "GitHub", description: "Аккаунт GitHub." },
   header: { label: "Заголовок от прокси", description: "Вход выполняет прокси перед интерфейсом и передаёт имя пользователя в заголовке." },
 };
-
-const IDLE: TestState = { status: "idle" };
 
 /** Plain string fields of the form, edited through `text()`. */
 type TextKey = "allowedEmails" | "adminEmails" | "githubUsers" | "headerName" | "headerTrusted" | "publicUrl" | "sessionTtl";
@@ -86,10 +84,7 @@ export function PanelTab() {
   const [saving, setSaving] = useState(false);
   const [confirmDisable, setConfirmDisable] = useState(false);
   const [tested, setTested] = useState<TestedKeys>({});
-  const [tests, setTests] = useState<Partial<Record<ProviderId, TestState>>>({});
-  const polls = useRef<Partial<Record<ProviderId, AbortController>>>({});
-
-  useEffect(() => () => Object.values(polls.current).forEach((c) => c?.abort()), []);
+  const tests = useProviderTests((id, key) => setTested((t) => ({ ...t, [id]: key })));
 
   const patch = useMemo<UiSettingsPatch | null>(() => (form && base ? buildPatch(form, base) : null), [form, base]);
   const dirty = !!patch && !isEmptyPatch(patch);
@@ -149,48 +144,6 @@ export function PanelTab() {
     ...extra,
   });
 
-  const setTest = (id: ProviderId, t: TestState) => setTests((m) => ({ ...m, [id]: t }));
-
-  const startTest = async (id: ProviderId) => {
-    polls.current[id]?.abort();
-    const key = verifyKey(form, id);
-    // Open the tab synchronously (inside the click) so popup blockers let it through.
-    const win = window.open("about:blank", "_blank");
-    setTest(id, { status: "starting" });
-    try {
-      const { url } = await serverApi.testProvider(id, providerFields(form, id));
-      if (win && !win.closed) {
-        win.opener = null;
-        win.location.href = url;
-      }
-      setTest(id, { status: "waiting", url, popupBlocked: !win });
-      const token = providerTestToken(url);
-      const ac = new AbortController();
-      polls.current[id] = ac;
-      let failMessage: string | undefined;
-      const outcome = token ? await waitForProviderTest(id, token, { signal: ac.signal, onFailed: (m) => (failMessage = m) }) : "timeout";
-      if (outcome === "cancelled") return;
-      if (outcome === "verified") {
-        setTested((t) => ({ ...t, [id]: key }));
-        setTest(id, IDLE);
-        toast.success("Вход через провайдера проверен");
-        void qc.invalidateQueries({ queryKey: qk.uiSettings });
-      } else if (outcome === "failed") {
-        setTest(id, { status: "failed", message: failMessage || "Провайдер не подтвердил вход" });
-      } else {
-        setTest(id, { status: "timeout" });
-      }
-    } catch (e) {
-      win?.close();
-      setTest(id, { status: "failed", message: errText(e) });
-    }
-  };
-
-  const cancelTest = (id: ProviderId) => {
-    polls.current[id]?.abort();
-    setTest(id, IDLE);
-  };
-
   const doSave = async () => {
     if (!patch || isEmptyPatch(patch)) return;
     setSaving(true);
@@ -242,6 +195,7 @@ export function PanelTab() {
             const blocked = isProvider(m) && !form.methods[m] && !verified;
             const err = errors[P.method(m)];
             const t = METHOD_TEXT[m];
+            const passkeyOff = m === "passkey" && s.auth.passkey && !s.auth.passkey.available;
             return (
               <div key={m} className="flex items-start gap-2.5">
                 <Checkbox
@@ -258,6 +212,11 @@ export function PanelTab() {
                     {t.description}
                     {blocked && !methodsLocked && " Сначала настройте провайдера ниже и нажмите «Проверить вход»: так вы не потеряете доступ."}
                   </span>
+                  {passkeyOff && (
+                    <span className="block text-xs text-amber-700 dark:text-amber-300">
+                      Сейчас не работает: {s.auth.passkey?.reason || "нужен https-адрес с доменным именем (PUBLIC_URL)"}
+                    </span>
+                  )}
                   {err && <span className="block text-xs text-destructive">{err}</span>}
                 </Label>
               </div>
@@ -356,10 +315,10 @@ export function PanelTab() {
             settings={s}
             errors={errors}
             verified={providerVerified(form, s, id, tested)}
-            test={tests[id] ?? IDLE}
+            test={tests.get(id)}
             onChange={(p) => setProvider(id, p)}
-            onTest={() => void startTest(id)}
-            onCancelTest={() => cancelTest(id)}
+            onTest={() => void tests.start(id, providerFields(form, id), verifyKey(form, id))}
+            onCancelTest={() => tests.cancel(id)}
           />
         ))}
         {!providerConfigured(form, "oidc") && !providerConfigured(form, "google") && !providerConfigured(form, "github") && (

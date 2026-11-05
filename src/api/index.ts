@@ -158,6 +158,8 @@ export const qk = {
   uiSettings: ["ui-settings"] as const,
   /** GET /_ui/api/me (profile, own tokens). */
   me: ["me"] as const,
+  /** GET /_ui/api/me/passkeys (under "me": invalidating qk.me refreshes it too). */
+  myPasskeys: ["me", "passkeys"] as const,
   /** GET /_ui/api/users (admin). */
   users: ["users"] as const,
   userTokens: (id: string) => ["users", id, "tokens"] as const,

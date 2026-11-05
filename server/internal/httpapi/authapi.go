@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/bropines/jackett-ui/server/internal/auth"
 	"github.com/bropines/jackett-ui/server/internal/config"
@@ -19,6 +20,7 @@ type stateProvider struct {
 
 type stateMethods struct {
 	Password  bool            `json:"password"`
+	Passkey   bool            `json:"passkey"`
 	Providers []stateProvider `json:"providers"`
 	Header    bool            `json:"header"`
 }
@@ -27,11 +29,13 @@ type stateUser struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Name     string `json:"name"`
+	Email    string `json:"email"`
 	Role     string `json:"role"`
 }
 
 type stateResponse struct {
 	SetupRequired bool           `json:"setupRequired"`
+	Onboarding    bool           `json:"onboarding"`
 	Authenticated bool           `json:"authenticated"`
 	Disabled      bool           `json:"disabled"`
 	User          *stateUser     `json:"user"`
@@ -58,8 +62,10 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request, re *reqEnv)
 		Methods:       loginMethods(eff),
 		Version:       s.version,
 	}
+	resp.Methods.Passkey = passkeyLoginOffered(eff, &re.st, re.rv.Origin(r))
 	if pr != nil && pr.user != nil {
-		resp.User = &stateUser{ID: pr.user.ID, Username: pr.user.Username, Name: pr.user.Name, Role: pr.user.Role}
+		resp.User = &stateUser{ID: pr.user.ID, Username: pr.user.Username, Name: pr.user.Name, Email: pr.user.Email, Role: pr.user.Role}
+		resp.Onboarding = fail == "" && onboardingFor(&re.st, pr)
 	}
 	if s.jc != nil {
 		resp.Jackett = s.jc.Status(r.Context())
@@ -119,7 +125,11 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv)
 	if !s.rateLimit(w, r, re) {
 		return
 	}
-	var body credentialsBody
+	var body struct {
+		credentialsBody
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeAPIError(w, err)
 		return
@@ -127,6 +137,19 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv)
 	name, err := usernameArg(body.Username, store.AdminUsername, "username")
 	if err != nil {
 		writeAPIError(w, err)
+		return
+	}
+	email, err := emailArg(body.Email, "email")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	display := strings.TrimSpace(body.Name)
+	if display == "" {
+		display = "Администратор"
+	}
+	if !users.ValidName(display) {
+		writeAPIError(w, badField("name", "Недопустимое имя"))
 		return
 	}
 	hash, err := auth.HashPassword(body.Password)
@@ -139,8 +162,10 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv)
 		if len(st.Users) > 0 {
 			return &apiError{Status: http.StatusConflict, Code: "not_in_setup", Message: "Администратор уже создан"}
 		}
-		u = newUser(name, "Администратор", store.RoleAdmin, hash, s.now())
+		u = newUser(name, display, store.RoleAdmin, hash, s.now())
+		u.Email = email
 		st.Users = append(st.Users, u)
+		st.Onboarded = true
 		return nil
 	})
 	if err != nil {
@@ -162,9 +187,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request, re *reqEnv)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// passwordHashOf: the env password wins for the user "admin".
+// envPassword: u logs in with AUTH_PASSWORD[_HASH] (the initial admin).
+func envPassword(eff config.Effective, u *store.User) bool {
+	return u.Bootstrap && eff.AdminPassword.Value != ""
+}
+
+// passwordHashOf: the env password wins for the initial admin.
 func passwordHashOf(eff config.Effective, u *store.User) string {
-	if u.Username == store.AdminUsername && eff.AdminPassword.Value != "" {
+	if envPassword(eff, u) {
 		return eff.AdminPassword.Value
 	}
 	return u.PasswordHash

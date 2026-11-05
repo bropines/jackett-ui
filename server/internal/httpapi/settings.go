@@ -55,9 +55,11 @@ func (s *Server) settingsView(r *http.Request, re *reqEnv) map[string]any {
 	for _, id := range config.MethodIDs {
 		methods[id] = fieldView{Value: eff.Methods.Value.Get(id), Locked: eff.Methods.Locked, Env: eff.Methods.Env}
 	}
+	rpID, reason := passkeyRP(re.rv.Origin(r))
 	return map[string]any{
 		"auth": map[string]any{
 			"methods":  methods,
+			"passkey":  map[string]any{"available": reason == "", "rpId": rpID, "reason": reason},
 			"disabled": fv(eff.Disabled),
 			"autoProvision": map[string]any{
 				"enabled": fv(eff.AutoProvision),
@@ -118,6 +120,7 @@ type putMethods struct {
 	Google   opt[bool] `json:"google"`
 	GitHub   opt[bool] `json:"github"`
 	Header   opt[bool] `json:"header"`
+	Passkey  opt[bool] `json:"passkey"`
 }
 
 func (m *putMethods) get(id string) opt[bool] {
@@ -132,6 +135,8 @@ func (m *putMethods) get(id string) opt[bool] {
 		return m.GitHub
 	case "header":
 		return m.Header
+	case "passkey":
+		return m.Passkey
 	}
 	return opt[bool]{}
 }

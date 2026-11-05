@@ -60,7 +60,7 @@ describe("PanelTab", () => {
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
     expect(put.mock.calls[0]![0]).toEqual({
       auth: {
-        methods: { password: true, oidc: true, google: false, github: true, header: false },
+        methods: { password: true, passkey: false, oidc: true, google: false, github: true, header: false },
         adminEmails: ["boss@example.com"],
         providers: { oidc: { providerName: "Keycloak" } },
       },

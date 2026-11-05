@@ -133,7 +133,7 @@ func ProviderHash(id, issuer, clientID, clientSecret, scopes string) string {
 }
 
 // MethodIDs are the login methods in display order.
-var MethodIDs = []string{"password", ProviderOIDC, ProviderGoogle, ProviderGitHub, "header"}
+var MethodIDs = []string{"password", "passkey", ProviderOIDC, ProviderGoogle, ProviderGitHub, "header"}
 
 // ValidRole reports whether r is viewer, editor or admin.
 func ValidRole(r string) bool {

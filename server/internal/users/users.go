@@ -265,3 +265,50 @@ func PruneInvites(s *store.Settings, now time.Time) {
 	}
 	s.Invites = out
 }
+
+// MaxEmailLen is the longest accepted e-mail address.
+const MaxEmailLen = 254
+
+// NormalizeEmail trims and lower-cases s.
+func NormalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// ValidEmail is a loose check: one "@" with text on both sides, no spaces
+// or control characters, at most MaxEmailLen bytes.
+func ValidEmail(s string) bool {
+	if len(s) > MaxEmailLen || !utf8.ValidString(s) {
+		return false
+	}
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at != strings.LastIndexByte(s, '@') || at == len(s)-1 {
+		return false
+	}
+	for _, c := range s {
+		if c <= 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// ByEmail returns the user with this (normalised) e-mail, nil if none or empty.
+func ByEmail(s *store.Settings, email string) *store.User {
+	if email == "" {
+		return nil
+	}
+	for i := range s.Users {
+		if s.Users[i].Email == email {
+			return &s.Users[i]
+		}
+	}
+	return nil
+}
+
+// BootstrapUser returns the user whose password is AUTH_PASSWORD, nil if none.
+func BootstrapUser(s *store.Settings) *store.User {
+	for i := range s.Users {
+		if s.Users[i].Bootstrap {
+			return &s.Users[i]
+		}
+	}
+	return nil
+}

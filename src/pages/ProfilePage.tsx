@@ -3,32 +3,44 @@ import { KeyRound, Link2, Loader2, MonitorSmartphone, Save, Unlink, UserRound } 
 import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
-import { errText, providerLinkUrl, qk, serverApi, type Identity, type Me, type ProviderId } from "@/api";
+import { ApiError, errText, providerLinkUrl, qk, serverApi, type Identity, type Me, type ProviderId } from "@/api";
 import { ProviderIcon } from "@/components/auth/ProviderIcon";
 import { RoleBadge } from "@/components/auth/RoleBadge";
 import { Callout, ConfirmDialog, ErrorState, Field, Mono, PageHeader, RelativeTime } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/misc";
-import { authErrorText, MIN_PASSWORD, newPasswordError, PROVIDER_NAMES } from "@/lib/auth";
+import { authErrorText, EMAIL_MAX, emailError, MIN_PASSWORD, newPasswordError, normalizeEmail, PROVIDER_NAMES } from "@/lib/auth";
 import { useAuthErrorParam, useLinkedParam } from "@/lib/auth-hooks";
 import { authStateQuery, resetSession } from "@/lib/auth-query";
+import { PasskeysCard } from "@/pages/profile/PasskeysCard";
 import { TokensCard } from "@/pages/profile/TokensCard";
 import { Section, SecretInput } from "@/pages/settings/parts";
 
 function NameCard({ me }: { me: Me }) {
   const qc = useQueryClient();
-  const [name, setName] = useState(me.user.name ?? "");
-  useEffect(() => setName(me.user.name ?? ""), [me.user.name]);
+  const curName = me.user.name ?? "";
+  const curEmail = me.user.email ?? "";
+  const [name, setName] = useState(curName);
+  const [email, setEmail] = useState(curEmail);
+  const [touched, setTouched] = useState(false);
+  useEffect(() => setName(curName), [curName]);
+  useEffect(() => setEmail(curEmail), [curEmail]);
+  const nameDirty = name.trim() !== curName;
+  const emailDirty = normalizeEmail(email) !== curEmail;
   const save = useMutation({
-    mutationFn: () => serverApi.updateMe({ name: name.trim() }),
+    mutationFn: () => serverApi.updateMe({ ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
     onSuccess: () => {
-      toast.success("Имя сохранено");
+      toast.success("Сохранено");
+      setTouched(false);
       void qc.invalidateQueries({ queryKey: qk.me });
       void qc.invalidateQueries({ queryKey: qk.authState });
     },
   });
-  const dirty = name.trim() !== (me.user.name ?? "");
+  const dirty = nameDirty || emailDirty;
+  const emailErr = emailError(email);
+  const err = save.isError ? save.error : undefined;
+  const serverEmailErr = err instanceof ApiError && (err.code === "email_taken" || err.code === "invalid_email" || err.field === "email") ? errText(err) : undefined;
   return (
     <Section id="account" title="Учётная запись" icon={UserRound}>
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -37,15 +49,33 @@ function NameCard({ me }: { me: Me }) {
         <RoleBadge role={me.user.role} />
       </div>
       <form
-        className="flex flex-col gap-2 sm:flex-row sm:items-end"
+        className="space-y-4"
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
-          if (dirty && !save.isPending) save.mutate();
+          setTouched(true);
+          if (dirty && !emailErr && !save.isPending) save.mutate();
         }}
       >
-        <Field label="Имя" htmlFor="me-name" className="min-w-0 flex-1" error={save.isError ? errText(save.error) : undefined}>
-          <Input id="me-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="name" />
-        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Имя" htmlFor="me-name">
+            <Input id="me-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="name" />
+          </Field>
+          <Field label="Почта" htmlFor="me-email" error={(touched ? emailErr : undefined) ?? serverEmailErr} hint="Необязательно. Пусто — удалить">
+            <Input
+              id="me-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              maxLength={EMAIL_MAX}
+              autoComplete="email"
+              autoCapitalize="none"
+              spellCheck={false}
+              aria-invalid={(touched && emailErr) || serverEmailErr ? true : undefined}
+            />
+          </Field>
+        </div>
+        {err && !serverEmailErr && <Callout variant="error">{errText(err)}</Callout>}
         <Button type="submit" variant="outline" disabled={!dirty || save.isPending}>
           {save.isPending ? <Loader2 className="animate-spin" /> : <Save />} Сохранить
         </Button>
@@ -230,7 +260,7 @@ function SessionsCard() {
   );
 }
 
-/** `/profile`: own account, password, linked accounts, API tokens, sessions. */
+/** `/profile`: own account, password, passkeys, linked accounts, API tokens, sessions. */
 export function ProfilePage() {
   const { data: auth } = useQuery(authStateQuery);
   const q = useQuery({ queryKey: qk.me, queryFn: () => serverApi.me(), enabled: !auth?.disabled });
@@ -266,6 +296,7 @@ export function ProfilePage() {
         <NameCard me={me} />
         <TokensCard tokens={me.tokens ?? []} />
         <PasswordCard me={me} passwordLogin={auth?.methods.password ?? true} />
+        <PasskeysCard />
         <IdentitiesCard me={{ ...me, identities: me.identities ?? [] }} providers={auth?.methods.providers ?? []} />
         <SessionsCard />
       </div>

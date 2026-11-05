@@ -1,11 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "@tanstack/react-router";
 import { Loader2 } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 
 import { onAuthRecheck, qk } from "@/api";
 import { ErrorState } from "@/components/common";
+import { WELCOME_PATH } from "@/lib/auth";
 import { authStateQuery, resetSession } from "@/lib/auth-query";
 import { LoginPage } from "@/pages/auth/LoginPage";
+import { OnboardingPage } from "@/pages/auth/OnboardingPage";
 import { SetupPage } from "@/pages/auth/SetupPage";
 
 function FullScreen({ children }: { children: ReactNode }) {
@@ -14,10 +17,12 @@ function FullScreen({ children }: { children: ReactNode }) {
 
 /**
  * Asks the jackett-ui server who we are (`/_ui/api/auth/state`) and shows the setup wizard,
- * the login page or the app. Any API call that finds the session gone re-triggers the check.
+ * the login page, the first-login wizard (`onboarding`) or the app. Any API call that finds the session gone re-triggers the check.
  */
 export function AuthGate({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
+  // Optional: the gate is also rendered without a router (tests).
+  const router = useRouter({ warn: false }) as ReturnType<typeof useRouter> | undefined;
   const state = useQuery(authStateQuery);
 
   useEffect(() => onAuthRecheck(() => void qc.invalidateQueries({ queryKey: qk.authState })), [qc]);
@@ -41,7 +46,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const s = state.data;
   const done = () => void resetSession(qc);
-  if (s.setupRequired) return <SetupPage onDone={done} />;
+  /** After a new account was made: continue on the login methods page. */
+  const toWelcome = (created: boolean) => {
+    if (created) {
+      if (router) void router.navigate({ to: "/welcome", search: { step: "methods" } });
+      else window.history.pushState(null, "", WELCOME_PATH);
+    }
+    done();
+  };
+  if (s.setupRequired) return <SetupPage onDone={toWelcome} />;
   if (!s.authenticated) return <LoginPage state={s} onDone={done} />;
+  if (s.onboarding && !s.disabled) return <OnboardingPage state={s} onDone={toWelcome} />;
   return <>{children}</>;
 }

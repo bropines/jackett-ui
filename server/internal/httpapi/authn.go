@@ -367,7 +367,10 @@ func canLogIn(eff config.Effective, envAdminPW bool, u *store.User, headerOK boo
 	if eff.Disabled.Value {
 		return true
 	}
-	if eff.MethodOn("password") && (u.PasswordHash != "" || (envAdminPW && u.Username == store.AdminUsername)) {
+	if eff.MethodOn("password") && (u.PasswordHash != "" || (envAdminPW && u.Bootstrap)) {
+		return true
+	}
+	if eff.MethodOn(passkeyMethod) && len(u.Passkeys) > 0 {
 		return true
 	}
 	for _, id := range u.Identities {

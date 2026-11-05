@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, serverApi, type IndexerSummary } from "@/api";
 import { ThemeProvider } from "@/lib/theme-provider";
 import { createAppRouter } from "@/router";
-import { authAs, authState, publicInvite, uiSettings } from "@/test/fixtures/auth";
+import { authAs, authState, me, publicInvite, uiSettings } from "@/test/fixtures/auth";
 
 import indexersSample from "../../contract/indexers.sample.json";
 
@@ -180,5 +180,50 @@ describe("invite page", () => {
     renderApp("/invite/bad");
     expect(await screen.findByText(text)).toBeInTheDocument();
     expect(screen.queryByLabelText("Пароль")).toBeNull();
+  });
+});
+
+describe("welcome page (login methods)", () => {
+  it("admin: password, passkey and provider cards; enables a verified provider with the full methods object", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authAs("admin"));
+    vi.spyOn(serverApi, "me").mockResolvedValue(me({ identities: [] }));
+    vi.spyOn(serverApi, "myPasskeys").mockResolvedValue([]);
+    const put = vi.spyOn(serverApi, "putSettings").mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderApp("/welcome?step=methods");
+
+    expect(await screen.findByRole("heading", { name: "Способы входа" })).toBeInTheDocument();
+    const password = screen.getByRole("region", { name: "Пароль" });
+    expect(await within(password).findByText("задан")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Passkey" })).toBeInTheDocument();
+
+    // OIDC: verified and on → link button with the welcome return path.
+    const oidc = await screen.findByRole("region", { name: "Authentik" });
+    expect(within(oidc).getByRole("link", { name: /Привязать к моему аккаунту/ })).toHaveAttribute(
+      "href",
+      "/_ui/auth/oidc/start?link=1&return=%2Fwelcome%3Fstep%3Dmethods",
+    );
+    // GitHub: verified but off → "Включить вход".
+    const github = screen.getByRole("region", { name: "GitHub" });
+    await user.click(within(github).getByRole("button", { name: /Включить вход/ }));
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith({ auth: { methods: { password: true, passkey: false, oidc: true, google: false, github: true, header: false } } }),
+    );
+    // Google: not configured → only "Настроить", which opens the provider form.
+    const google = screen.getByRole("region", { name: "Google" });
+    expect(within(google).queryByRole("button", { name: /Включить вход/ })).toBeNull();
+    await user.click(within(google).getByRole("button", { name: /Настроить/ }));
+    const dialog = await screen.findByRole("dialog", { name: /Настроить Google/ });
+    expect(within(dialog).getByText("https://jackett.example.com/_ui/auth/google/callback")).toBeInTheDocument();
+  });
+
+  it("viewer: no provider cards", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authAs("viewer"));
+    vi.spyOn(serverApi, "me").mockResolvedValue(me());
+    vi.spyOn(serverApi, "myPasskeys").mockResolvedValue([]);
+    renderApp("/welcome?step=methods");
+    expect(await screen.findByRole("region", { name: "Passkey" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "GitHub" })).toBeNull();
+    expect(serverApi.getSettings).not.toHaveBeenCalled();
   });
 });

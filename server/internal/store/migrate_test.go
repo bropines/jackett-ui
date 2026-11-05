@@ -28,13 +28,13 @@ func TestMigrateV1Modes(t *testing.T) {
 		role     string
 		admin    bool
 	}{
-		{"password", `"mode":"password","passwordHash":"$2a$12$hash"`, Methods{Password: true}, false, RoleViewer, true},
-		{"never configured", `"mode":""`, Methods{Password: true}, false, RoleViewer, false},
-		{"sso with fallback", `"mode":"sso","passwordHash":"$2a$12$hash",` + providers, Methods{Password: true, OIDC: true, GitHub: true}, false, RoleAdmin, true},
-		{"sso without fallback", `"mode":"sso","passwordFallback":false,` + providers, Methods{OIDC: true, GitHub: true}, false, RoleAdmin, false},
-		{"legacy oidc (no password: fallback off)", `"mode":"oidc",` + providers, Methods{OIDC: true, GitHub: true}, false, RoleAdmin, false},
-		{"header", `"mode":"header","header":{"name":"X-User","trusted":["10.0.0.0/8"]}`, Methods{Header: true}, false, RoleAdmin, false},
-		{"none", `"mode":"none","passwordHash":"$2a$12$hash"`, Methods{Password: true}, true, RoleViewer, true},
+		{"password", `"mode":"password","passwordHash":"$2a$12$hash"`, Methods{Password: true, Passkey: true}, false, RoleViewer, true},
+		{"never configured", `"mode":""`, Methods{Password: true, Passkey: true}, false, RoleViewer, false},
+		{"sso with fallback", `"mode":"sso","passwordHash":"$2a$12$hash",` + providers, Methods{Password: true, OIDC: true, GitHub: true, Passkey: true}, false, RoleAdmin, true},
+		{"sso without fallback", `"mode":"sso","passwordFallback":false,` + providers, Methods{OIDC: true, GitHub: true, Passkey: true}, false, RoleAdmin, false},
+		{"legacy oidc (no password: fallback off)", `"mode":"oidc",` + providers, Methods{OIDC: true, GitHub: true, Passkey: true}, false, RoleAdmin, false},
+		{"header", `"mode":"header","header":{"name":"X-User","trusted":["10.0.0.0/8"]}`, Methods{Header: true, Passkey: true}, false, RoleAdmin, false},
+		{"none", `"mode":"none","passwordHash":"$2a$12$hash"`, Methods{Password: true, Passkey: true}, true, RoleViewer, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -48,7 +48,7 @@ func TestMigrateV1Modes(t *testing.T) {
 				t.Fatalf("Migrated = %d", st.Migrated)
 			}
 			s := st.Get()
-			if s.Version != 2 || s.Auth.Methods != c.methods || s.Auth.Disabled != c.disabled || s.Auth.AutoProvision.Role != c.role || !s.Auth.AutoProvision.Enabled {
+			if s.Version != CurrentVersion || s.Auth.Methods != c.methods || s.Auth.Disabled != c.disabled || s.Auth.AutoProvision.Role != c.role || !s.Auth.AutoProvision.Enabled {
 				t.Fatalf("auth: %+v", s.Auth)
 			}
 			if s.AuthEpoch != 5 || s.PublicURL != "https://j.example" || s.SessionTTL != "24h" || len(s.SessionKey) != SessionKeySize {
@@ -77,7 +77,7 @@ func TestMigrateV1Modes(t *testing.T) {
 				t.Fatal("backup not 0600")
 			}
 			raw, _ := os.ReadFile(st.Path())
-			if strings.Contains(string(raw), `"mode"`) || strings.Contains(string(raw), "passwordFallback") || !strings.Contains(string(raw), `"version": 2`) {
+			if strings.Contains(string(raw), `"mode"`) || strings.Contains(string(raw), "passwordFallback") || !strings.Contains(string(raw), `"version": 3`) {
 				t.Fatalf("new file: %s", raw)
 			}
 			// Reopen: no second migration.
@@ -92,12 +92,12 @@ func TestMigrateV1Modes(t *testing.T) {
 func TestMigrateVersionZeroAndFreshDefaults(t *testing.T) {
 	dir := writeV1(t, `{"authEpoch":1}`)
 	st, err := Open(dir)
-	if err != nil || st.Migrated != 1 || st.Get().Auth.Methods != (Methods{Password: true}) {
+	if err != nil || st.Migrated != 1 || st.Get().Auth.Methods != (Methods{Password: true, Passkey: true}) {
 		t.Fatalf("v0: %v %+v", err, st.Get().Auth)
 	}
 	fresh, _ := Open(t.TempDir())
 	s := fresh.Get()
-	if fresh.Migrated != 0 || s.Auth.Methods != (Methods{Password: true}) || !s.Auth.AutoProvision.Enabled || s.Auth.AutoProvision.Role != RoleViewer || len(s.Users) != 0 {
+	if fresh.Migrated != 0 || s.Auth.Methods != (Methods{Password: true, Passkey: true}) || !s.Auth.AutoProvision.Enabled || s.Auth.AutoProvision.Role != RoleViewer || len(s.Users) != 0 {
 		t.Fatalf("fresh: %+v", s.Auth)
 	}
 }

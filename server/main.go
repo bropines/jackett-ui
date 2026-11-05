@@ -32,6 +32,14 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(healthcheck())
 	}
+	// `jackett-ui reset-password <user>`: recovery (docker/kubectl exec).
+	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
+		if err := resetPassword(os.Args[2:], os.LookupEnv, stdinPassword(os.Stdin, os.Stderr), os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "jackett-ui:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "jackett-ui:", err)
 		os.Exit(1)
@@ -51,8 +59,12 @@ func run() error {
 		return err
 	}
 	if st.Migrated > 0 {
-		log.Warn("settings file migrated to format 2 (users, roles, API tokens); the old file is kept",
-			"from", st.Migrated, "backup", store.BackupV1Name)
+		backup := store.BackupV1Name
+		if st.Migrated == 2 {
+			backup = store.BackupV2Name
+		}
+		log.Warn("settings file migrated to the current format; the old file is kept",
+			"from", st.Migrated, "to", store.CurrentVersion, "backup", backup)
 	}
 	if env.AuthMode != "" {
 		log.Warn("AUTH_MODE is deprecated: use AUTH_METHODS (password,oidc,google,github,header) and AUTH_DISABLED", "AUTH_MODE", env.AuthMode)
@@ -187,7 +199,8 @@ func healthcheck() int {
 func authReset(st *store.Store) error {
 	return st.Update(func(s *store.Settings) error {
 		s.Users, s.Tokens, s.Invites = nil, nil, nil
-		s.Auth.Methods = store.Methods{Password: true}
+		s.Auth.Methods = store.Methods{Password: true, Passkey: true}
+		s.Onboarded = false
 		s.Auth.Disabled = false
 		s.Auth.Providers = store.Providers{}
 		s.Auth.AllowedEmails = nil

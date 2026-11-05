@@ -27,7 +27,7 @@ const editProvider = (f: AuthForm, id: keyof AuthForm["providers"], over: Partia
 describe("toAuthForm", () => {
   it("maps settings to form values", () => {
     const f = toAuthForm(uiSettings());
-    expect(f.methods).toEqual({ password: true, oidc: true, google: false, github: false, header: false });
+    expect(f.methods).toEqual({ password: true, passkey: false, oidc: true, google: false, github: false, header: false });
     expect(f.disabled).toBe(false);
     expect(f.autoProvision).toBe(true);
     expect(f.defaultRole).toBe("viewer");
@@ -85,7 +85,7 @@ describe("buildPatch", () => {
     const s = uiSettings();
     const f = toAuthForm(s);
     expect(buildPatch(edit(f, { methods: { ...f.methods, github: true } }), s)).toEqual({
-      auth: { methods: { password: true, oidc: true, google: false, github: true, header: false } },
+      auth: { methods: { password: true, passkey: false, oidc: true, google: false, github: true, header: false } },
     });
   });
 

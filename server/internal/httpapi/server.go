@@ -72,6 +72,8 @@ type Server struct {
 
 	tests *testFlows
 	usage *tokenUsage
+	// ceremonies: pending passkey ceremonies.
+	ceremonies *ceremonies
 
 	handler http.Handler
 }
@@ -91,7 +93,7 @@ func New(o Options) (*Server, error) {
 	if o.GoogleIssuer == "" {
 		o.GoogleIssuer = config.GoogleIssuer
 	}
-	if err := ensureEnvAdmin(o.Env, o.Store, o.Now()); err != nil {
+	if err := ensureEnvAdmin(o.Env, o.Store, o.Now(), o.Log); err != nil {
 		return nil, err
 	}
 	key := o.Store.Get().SessionKey
@@ -112,6 +114,7 @@ func New(o Options) (*Server, error) {
 		githubEndpoints: o.GitHubEndpoints,
 		provCache:       map[string]*provEntry{},
 		tests:           newTestFlows(),
+		ceremonies:      newCeremonies(),
 		usage:           newTokenUsage(),
 	}
 	s.sessions.Now = o.Now
@@ -125,21 +128,34 @@ func New(o Options) (*Server, error) {
 	return s, nil
 }
 
-// ensureEnvAdmin creates the user "admin" (role admin, no stored password)
-// when AUTH_PASSWORD[_HASH] is set and the user is missing.
-func ensureEnvAdmin(env *config.Env, st *store.Store, now time.Time) error {
+// ensureEnvAdmin binds AUTH_PASSWORD[_HASH] to the initial admin (the user
+// with Bootstrap set). Before the first-login wizard ran, the user "admin"
+// becomes that user (created if missing). Afterwards a missing initial admin
+// (replaced in the wizard, or deleted) means the env password is ignored.
+func ensureEnvAdmin(env *config.Env, st *store.Store, now time.Time, log *slog.Logger) error {
 	if env.PasswordHash == "" {
 		return nil
 	}
 	cur := st.Get()
-	if users.ByUsername(&cur, store.AdminUsername) != nil {
+	if users.BootstrapUser(&cur) != nil {
+		return nil
+	}
+	if cur.Onboarded {
+		log.Warn(env.PasswordVar + " is set but ignored: the initial admin was replaced. Remove it from the environment; " +
+			`use "jackett-ui reset-password <user>" to recover access`)
 		return nil
 	}
 	return st.Update(func(s *store.Settings) error {
-		if users.ByUsername(s, store.AdminUsername) != nil {
+		if users.BootstrapUser(s) != nil || s.Onboarded {
 			return nil
 		}
-		s.Users = append(s.Users, newUser(store.AdminUsername, "Администратор", store.RoleAdmin, "", now))
+		if u := users.ByUsername(s, store.AdminUsername); u != nil {
+			u.Bootstrap = true
+			return nil
+		}
+		u := newUser(store.AdminUsername, "Администратор", store.RoleAdmin, "", now)
+		u.Bootstrap = true
+		s.Users = append(s.Users, u)
 		return nil
 	})
 }
@@ -360,6 +376,19 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 			}
 		}})
 		return
+	case rest == "auth/passkey/begin" || rest == "auth/passkey/finish":
+		dispatch(w, r, handlers{"POST": func() {
+			if !csrfOK(r, re.rv) {
+				writeCSRF(w)
+				return
+			}
+			if rest == "auth/passkey/begin" {
+				s.handlePasskeyLoginBegin(w, r, re)
+			} else {
+				s.handlePasskeyLoginFinish(w, r, re)
+			}
+		}})
+		return
 	case len(seg) == 2 && seg[0] == "invites" && r.Method != http.MethodDelete:
 		// GET /invites/{token} is public; DELETE /invites/{id} is admin.
 		dispatch(w, r, handlers{"GET": func() { s.handleInvitePublic(w, r, re, seg[1]) }})
@@ -399,6 +428,8 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 	switch {
 	case rest == "auth/logout-all":
 		dispatch(w, r, handlers{"POST": func() { s.handleLogoutAll(w, r, re, pr) }})
+	case rest == "onboarding":
+		dispatch(w, r, handlers{"POST": func() { s.handleOnboarding(w, r, re, pr) }})
 
 	// ---- me ----
 	case rest == "me":
@@ -410,6 +441,17 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 		dispatch(w, r, handlers{"POST": func() { s.handleMePassword(w, r, re, pr) }})
 	case len(seg) == 3 && seg[0] == "me" && seg[1] == "identities":
 		dispatch(w, r, handlers{"DELETE": func() { s.handleUnlink(w, r, re, pr, pr.uid(), seg[2]) }})
+	case rest == "me/passkeys":
+		dispatch(w, r, handlers{"GET": func() { s.handleMyPasskeys(w, re, pr) }})
+	case rest == "me/passkeys/begin":
+		dispatch(w, r, handlers{"POST": func() { s.handlePasskeyRegisterBegin(w, r, re, pr) }})
+	case rest == "me/passkeys/finish":
+		dispatch(w, r, handlers{"POST": func() { s.handlePasskeyRegisterFinish(w, r, re, pr) }})
+	case len(seg) == 3 && seg[0] == "me" && seg[1] == "passkeys":
+		dispatch(w, r, handlers{
+			"PATCH":  func() { s.handlePasskeyRename(w, r, pr, seg[2]) },
+			"DELETE": func() { s.handlePasskeyDelete(w, pr, pr.uid(), seg[2]) },
+		})
 	case rest == "me/tokens":
 		dispatch(w, r, handlers{
 			"GET":  func() { s.handleMyTokens(w, re, pr) },
@@ -435,6 +477,8 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 		dispatch(w, r, handlers{"GET": admin(func() { s.handleUserTokens(w, re, seg[1]) })})
 	case len(seg) == 4 && seg[0] == "users" && seg[2] == "identities":
 		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleUnlink(w, r, re, pr, seg[1], seg[3]) })})
+	case len(seg) == 4 && seg[0] == "users" && seg[2] == "passkeys":
+		dispatch(w, r, handlers{"DELETE": admin(func() { s.handlePasskeyDelete(w, pr, seg[1], seg[3]) })})
 	case len(seg) == 2 && seg[0] == "tokens":
 		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleTokenDelete(w, r, re, pr, seg[1], false) })})
 

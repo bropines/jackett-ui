@@ -3,10 +3,10 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { serverApi } from "@/api";
+import { ApiError, serverApi } from "@/api";
 import { TooltipProvider } from "@/components/ui/misc";
 import { ProfilePage } from "@/pages/ProfilePage";
-import { authState, me, token } from "@/test/fixtures/auth";
+import { authState, me, passkey, token } from "@/test/fixtures/auth";
 
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -24,12 +24,41 @@ const SECRET = "jui_AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 beforeEach(() => {
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/profile");
+  vi.spyOn(serverApi, "myPasskeys").mockResolvedValue([]);
   vi.spyOn(serverApi, "authState").mockResolvedValue(
     authState({ methods: { password: true, providers: [{ id: "github", name: "GitHub" }, { id: "oidc", name: "Authentik" }], header: false } }),
   );
 });
 
 describe("ProfilePage", () => {
+  it("lists passkeys, edits the e-mail and shows would_lock_out on delete", async () => {
+    vi.spyOn(serverApi, "me").mockResolvedValue(me());
+    vi.spyOn(serverApi, "myPasskeys").mockResolvedValue([passkey({ synced: true }), passkey({ id: "pk_2", name: "Ключ", cloneWarning: true, lastUsedAt: null })]);
+    const del = vi.spyOn(serverApi, "deleteMyPasskey").mockRejectedValue(new ApiError(409, "После этого войти будет невозможно", undefined, "would_lock_out"));
+    const update = vi.spyOn(serverApi, "updateMe").mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    wrap();
+
+    const list = await screen.findByRole("list", { name: "Мои passkey" });
+    expect(within(list).getByText("Windows")).toBeInTheDocument();
+    expect(within(list).getByText("синхронизирован")).toBeInTheDocument();
+    expect(within(list).getByText(/скопирован/)).toBeInTheDocument();
+    expect(within(list).getByText("никогда")).toBeInTheDocument();
+
+    await user.click(within(list).getByRole("button", { name: "Удалить Ключ" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Удалить" }));
+    expect(del).toHaveBeenCalledWith("pk_2");
+    expect(await screen.findByText("После этого войти будет невозможно")).toBeInTheDocument();
+
+    const email = screen.getByLabelText("Почта");
+    expect(email).toHaveValue("admin@example.com");
+    await user.clear(email);
+    await user.type(email, "New@Example.com");
+    await user.click(within(screen.getByRole("region", { name: "Учётная запись" })).getByRole("button", { name: /Сохранить/ }));
+    expect(update).toHaveBeenCalledWith({ email: "new@example.com" });
+  });
+
+
   it("lists tokens without secrets and linked accounts with link / unlink", async () => {
     vi.spyOn(serverApi, "me").mockResolvedValue(me());
     wrap();

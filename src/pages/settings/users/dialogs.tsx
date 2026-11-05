@@ -2,20 +2,40 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Loader2, Trash2 } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 
-import { errText, qk, serverApi, type CreatedInvite, type Role, type UserEntry } from "@/api";
+import { ApiError, errText, qk, serverApi, type CreatedInvite, type Role, type UserEntry } from "@/api";
 import { RolePicker } from "@/components/auth/RolePicker";
 import { Callout, CopyField, EmptyState, ErrorState, Field, Mono, RelativeTime } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/misc";
-import { MIN_PASSWORD, newPasswordError, usernameError } from "@/lib/auth";
+import { EMAIL_MAX, emailError, MIN_PASSWORD, newPasswordError, normalizeEmail, usernameError } from "@/lib/auth";
 import { formatDateTime } from "@/lib/format";
 import { SecretInput } from "@/pages/settings/parts";
 import { absoluteUrl, INVITE_DEFAULT_DAYS, INVITE_MAX_DAYS, inviteDaysError } from "@/pages/settings/users/logic";
 
 function FormError({ children }: { children: ReactNode }) {
   return children ? <Callout variant="error">{children}</Callout> : null;
+}
+
+/** Server error that belongs to the e-mail field (email_taken / invalid_email). */
+const emailServerError = (e: unknown) =>
+  e instanceof ApiError && (e.code === "email_taken" || e.code === "invalid_email" || e.field === "email") ? errText(e) : undefined;
+
+function EmailInput({ id, value, onChange, invalid }: { id: string; value: string; onChange: (v: string) => void; invalid?: boolean }) {
+  return (
+    <Input
+      id={id}
+      type="email"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      maxLength={EMAIL_MAX}
+      autoComplete="off"
+      autoCapitalize="none"
+      spellCheck={false}
+      aria-invalid={invalid ? true : undefined}
+    />
+  );
 }
 
 /* ── Invite ── */
@@ -106,11 +126,19 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
   const qc = useQueryClient();
   const [username, setUsername] = useState("");
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("viewer");
   const [pw, setPw] = useState("");
   const [touched, setTouched] = useState(false);
   const create = useMutation({
-    mutationFn: () => serverApi.createUser({ username: username.trim().toLowerCase(), name: name.trim(), role, password: pw }),
+    mutationFn: () =>
+      serverApi.createUser({
+        username: username.trim().toLowerCase(),
+        name: name.trim(),
+        ...(normalizeEmail(email) ? { email: normalizeEmail(email) } : {}),
+        role,
+        password: pw,
+      }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.users });
       close(false);
@@ -118,12 +146,15 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
   });
   const userErr = usernameError(username);
   const pwErr = newPasswordError(pw, pw, { requireRepeat: false });
+  const emailErr = emailError(email);
+  const serverEmailErr = emailServerError(create.error);
 
   function close(o: boolean) {
     onOpenChange(o);
     if (!o) {
       setUsername("");
       setName("");
+      setEmail("");
       setRole("viewer");
       setPw("");
       setTouched(false);
@@ -134,7 +165,7 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setTouched(true);
-    if (userErr || pwErr || create.isPending) return;
+    if (userErr || pwErr || emailErr || create.isPending) return;
     create.mutate();
   };
 
@@ -154,6 +185,9 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
               <Input id="new-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="off" />
             </Field>
           </div>
+          <Field label="Почта" htmlFor="new-email" error={(touched ? emailErr : undefined) ?? serverEmailErr} hint="Необязательно">
+            <EmailInput id="new-email" value={email} onChange={setEmail} invalid={(touched && !!emailErr) || !!serverEmailErr} />
+          </Field>
           <Field label="Пароль" htmlFor="new-password" error={touched ? pwErr : undefined} hint={`Не короче ${MIN_PASSWORD} символов`}>
             <SecretInput id="new-password" value={pw} onChange={setPw} autoComplete="new-password" />
           </Field>
@@ -161,13 +195,85 @@ export function CreateUserDialog({ open, onOpenChange }: { open: boolean; onOpen
             <legend className="mb-2 text-sm font-medium">Роль</legend>
             <RolePicker id="new-role" value={role} onChange={setRole} />
           </fieldset>
-          <FormError>{create.isError ? errText(create.error) : null}</FormError>
+          <FormError>{create.isError && !serverEmailErr ? errText(create.error) : null}</FormError>
           <DialogFooter className="gap-2">
             <Button type="button" variant="outline" onClick={() => close(false)}>
               Отмена
             </Button>
             <Button type="submit" disabled={create.isPending}>
               {create.isPending && <Loader2 className="animate-spin" />} Создать
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ── Name and e-mail ── */
+
+export function EditUserDialog({ user, onOpenChange }: { user: UserEntry | null; onOpenChange: (open: boolean) => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [touched, setTouched] = useState(false);
+  const [forUser, setForUser] = useState<string | undefined>();
+  if (user && user.id !== forUser) {
+    setForUser(user.id);
+    setName(user.name ?? "");
+    setEmail(user.email ?? "");
+  }
+  const nameDirty = !!user && name.trim() !== (user.name ?? "");
+  const emailDirty = !!user && normalizeEmail(email) !== (user.email ?? "");
+  const save = useMutation({
+    mutationFn: () =>
+      serverApi.updateUser(user!.id, { ...(nameDirty ? { name: name.trim() } : {}), ...(emailDirty ? { email: normalizeEmail(email) } : {}) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.users });
+      void qc.invalidateQueries({ queryKey: qk.authState });
+      close(false);
+    },
+  });
+  const emailErr = emailError(email);
+  const serverEmailErr = emailServerError(save.error);
+
+  function close(o: boolean) {
+    onOpenChange(o);
+    if (!o) {
+      setForUser(undefined);
+      setTouched(false);
+      save.reset();
+    }
+  }
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    setTouched(true);
+    if (emailErr || save.isPending || !(nameDirty || emailDirty)) return;
+    save.mutate();
+  };
+
+  return (
+    <Dialog open={!!user} onOpenChange={close}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Изменить: {user?.username}</DialogTitle>
+          <DialogDescription>Имя и почта. Почта нужна только для справки.</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4" noValidate>
+          <Field label="Имя" htmlFor="edit-name">
+            <Input id="edit-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} autoComplete="off" />
+          </Field>
+          <Field label="Почта" htmlFor="edit-email" error={(touched ? emailErr : undefined) ?? serverEmailErr} hint="Пусто — удалить">
+            <EmailInput id="edit-email" value={email} onChange={setEmail} invalid={(touched && !!emailErr) || !!serverEmailErr} />
+          </Field>
+          <FormError>{save.isError && !serverEmailErr ? errText(save.error) : null}</FormError>
+          <DialogFooter className="gap-2">
+            <Button type="button" variant="outline" onClick={() => close(false)}>
+              Отмена
+            </Button>
+            <Button type="submit" disabled={save.isPending || !(nameDirty || emailDirty)}>
+              {save.isPending && <Loader2 className="animate-spin" />} Сохранить
             </Button>
           </DialogFooter>
         </form>

@@ -1,4 +1,4 @@
-/** Fixtures in the JSON shapes of docs/spec-v0.3-users.md §5. */
+/** Fixtures in the JSON shapes of docs/spec-v0.3-users.md §5 and docs/spec-v0.4-auth.md. */
 import type {
   ApiToken,
   AuthState,
@@ -6,6 +6,7 @@ import type {
   Invite,
   Me,
   MethodId,
+  Passkey,
   ProviderSettingsBase,
   PublicInvite,
   Role,
@@ -22,9 +23,10 @@ export const authState = (over: Partial<AuthState> = {}): AuthState => ({
   authenticated: true,
   disabled: false,
   user: adminUser,
-  methods: { password: true, providers: [], header: false },
+  onboarding: false,
+  methods: { password: true, passkey: false, providers: [], header: false },
   jackett: { ok: true, version: "v0.24.3003" },
-  version: "0.3.0",
+  version: "0.4.0",
   ...over,
 });
 
@@ -44,15 +46,28 @@ export const token = (over: Partial<ApiToken> = {}): ApiToken => ({
 });
 
 export const me = (over: Partial<Me> = {}): Me => ({
-  user: { ...adminUser, passwordSet: true },
+  user: { ...adminUser, email: "admin@example.com", passwordSet: true },
   identities: [{ provider: "github", label: "octocat", linkedAt: "2026-10-02T12:00:00Z" }],
   tokens: [token()],
+  ...over,
+});
+
+export const passkey = (over: Partial<Passkey> = {}): Passkey => ({
+  id: "pk_laptop000000001",
+  name: "Windows",
+  createdAt: "2026-10-01T10:00:00Z",
+  lastUsedAt: "2026-11-03T08:30:00Z",
+  synced: false,
+  cloneWarning: false,
   ...over,
 });
 
 export const users = (): UserEntry[] => [
   {
     ...adminUser,
+    email: "admin@example.com",
+    bootstrap: true,
+    passkeyCount: 1,
     disabled: false,
     identities: [{ provider: "oidc", label: "me@example.com", linkedAt: "2026-10-01T10:00:00Z" }],
     tokenCount: 2,
@@ -100,6 +115,7 @@ const plain = (id: string, clientId = "", secretSet = false, verified = false, l
 
 const methods = (on: Partial<Record<MethodId, boolean>>, locked = false): UiSettings["auth"]["methods"] => ({
   password: L(!!on.password, locked, locked ? "AUTH_METHODS" : undefined),
+  passkey: L(!!on.passkey, locked, locked ? "AUTH_METHODS" : undefined),
   oidc: L(!!on.oidc, locked, locked ? "AUTH_METHODS" : undefined),
   google: L(!!on.google, locked, locked ? "AUTH_METHODS" : undefined),
   github: L(!!on.github, locked, locked ? "AUTH_METHODS" : undefined),
@@ -131,6 +147,7 @@ export const uiSettings = (): UiSettings => ({
       name: L("Remote-User"),
       trusted: L(["172.16.0.0/12"]),
     },
+    passkey: { available: true, rpId: "jackett.example.com" },
   },
   publicUrl: L(""),
   sessionTtl: L("168h", true, "SESSION_TTL"),
@@ -158,6 +175,7 @@ export const uiSettingsPassword = (): UiSettings => ({
       github: plain("github"),
     },
     header: { name: L("Remote-User"), trusted: L<string[]>([]) },
+    passkey: { available: false, rpId: "192.168.1.10", reason: "Passkey работает только по https-адресу с доменным именем (PUBLIC_URL)" },
   },
   publicUrl: L(""),
   sessionTtl: L("168h"),

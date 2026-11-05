@@ -71,16 +71,20 @@ Login settings go into `ui.env` (plain values) and `ui.existingSecret` (a Secret
 
 ## Login
 
-Pick the mode in **Settings → Вход и безопасность**, or with `AUTH_MODE`.
+The panel has its own accounts with roles (admin, editor, viewer), invites and per-user API tokens. Login methods are independent switches in **Настройки → Панель → Способы входа**, or `AUTH_METHODS`:
 
-| Mode | What it does |
+| Method | What it does |
 |---|---|
-| `password` (default) | one admin account; the password is set in the first-run wizard or with `AUTH_PASSWORD` |
-| `sso` | buttons for the configured providers; the password can stay as a fallback |
+| `password` (default) | user name + password |
+| `passkey` (default) | Touch ID, Windows Hello, a phone or a security key. Needs an https address with a domain name (`PUBLIC_URL`) |
+| `oidc`, `google`, `github` | a button per configured provider (table below) |
 | `header` | your reverse proxy authenticates (Authelia, Authentik outpost, …) and passes the user in a header; trusted only from the given addresses |
-| `none` | no login (explicit only; the UI shows a red warning) |
 
-**SSO providers** — each one is enabled when its client id is set, and shows as its own button:
+`AUTH_DISABLED=true` turns login off completely (the UI shows a red warning).
+
+**First run.** Without `AUTH_PASSWORD` the UI opens a setup wizard: login, name, e-mail, password. With `AUTH_PASSWORD` you log in once as `admin` with that password, and the UI asks you to make your own account. You can **replace** `admin`, and then the env password stops working, so remove it. Or you can **add** a second admin and keep `admin`. Both paths end on a page where you add a passkey and set up and link Google, GitHub or OIDC right away.
+
+**SSO providers.** Each one is enabled when its client id is set, and shows as its own button:
 
 | Provider | Variables | Redirect URL to register |
 |---|---|---|
@@ -88,11 +92,19 @@ Pick the mode in **Settings → Вход и безопасность**, or with 
 | Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `<PUBLIC_URL>/_ui/auth/google/callback` |
 | GitHub | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | `<PUBLIC_URL>/_ui/auth/github/callback` |
 
-**Who may log in** with SSO: `AUTH_ALLOWED_EMAILS` (verified e-mails, any provider), `GITHUB_USERS` (GitHub logins), `OIDC_ALLOWED_GROUPS`. If none is set, external logins are refused — otherwise anyone with a Google or GitHub account could get in.
+Linked accounts always get in. **New accounts** from SSO are created only for `AUTH_ALLOWED_EMAILS` (verified e-mails, any provider), `GITHUB_USERS` (GitHub logins) or `OIDC_ALLOWED_GROUPS`. If none is set, unknown external logins are refused; otherwise anyone with a Google or GitHub account could get in.
 
-When you set up a provider in the UI, "Проверить вход" runs a test login first; SSO can only be switched on with a provider that passed it, so you can't lock yourself out. If you do: start once with `AUTH_RESET=1` (it resets the login settings, not Jackett), set a new password, remove the variable.
+When you set up a provider in the UI, "Проверить вход" runs a test login first. A method can only be switched on with a provider that passed it, and the server refuses changes that would leave no admin able to log in.
 
-Clients that use the Jackett API key (qBittorrent's search plugin, Sonarr/Radarr, Torznab feeds, `.torrent` download links) keep working without a login: those URLs carry the key and Jackett checks it.
+**Locked out?** Set a new password from the command line. The running server picks it up, no restart needed:
+
+```bash
+docker exec -it jackett jackett-ui reset-password admin --enable-password-login
+```
+
+In Kubernetes: `kubectl exec -it deploy/jackett -c ui -- /jackett-ui reset-password admin`. The heavy option is `AUTH_RESET=1`: it deletes all users and login settings (not Jackett's), so remove it right after.
+
+Clients that use the Jackett API key (qBittorrent's search plugin, Sonarr/Radarr, Torznab feeds, `.torrent` download links) keep working without a login: those URLs carry the key (or a personal API token).
 
 ## Configuration
 
@@ -106,15 +118,16 @@ Everything is optional. Environment variables win over the settings made in the 
 | `DATA_DIR` | `/config` (aio), `/data` (UI image) | settings file `jackett-ui.json` |
 | `PUBLIC_URL` | from the request | external URL, e.g. `https://jackett.example.com` (redirect URLs, secure cookies) |
 | `TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | reverse proxies whose `X-Forwarded-*` headers are trusted |
-| `AUTH_MODE` | `password` | `password`, `sso`, `header`, `none` |
-| `AUTH_PASSWORD` / `AUTH_PASSWORD_HASH` | | admin password (plain, or a bcrypt hash) |
-| `AUTH_PASSWORD_FALLBACK` | `true` | keep the password login next to SSO |
+| `AUTH_METHODS` | `password,passkey` | login methods: `password`, `passkey`, `oidc`, `google`, `github`, `header` |
+| `AUTH_DISABLED` | `false` | no login at all |
+| `AUTH_PASSWORD` / `AUTH_PASSWORD_HASH` | | first-login password of `admin` (plain, or a bcrypt hash); ignored once `admin` was replaced |
+| `AUTH_AUTO_PROVISION`, `AUTH_DEFAULT_ROLE`, `AUTH_ADMIN_EMAILS` | `true`, `viewer`, — | accounts for new allowed SSO logins, their role, who becomes admin |
 | `AUTH_ALLOWED_EMAILS`, `GITHUB_USERS` | | who may log in with SSO |
 | `OIDC_*`, `GOOGLE_*`, `GITHUB_*` | | SSO providers (table above); also `OIDC_SCOPES`, `OIDC_ALLOWED_GROUPS`, `OIDC_GROUPS_CLAIM` |
 | `OIDC_ALLOW_UNVERIFIED_EMAIL` | `false` | accept `email_verified=false` from your own OIDC provider for `AUTH_ALLOWED_EMAILS` (Authentik sends false by default). Google and GitHub stay strict |
 | `AUTH_HEADER_NAME`, `AUTH_HEADER_TRUSTED` | `Remote-User`, — | header mode |
 | `SESSION_TTL` | `168h` | how long a login lasts |
-| `AUTH_RESET` | | `1` resets the login settings on start (remove it afterwards) |
+| `AUTH_RESET` | | `1` deletes all users and login settings on start (remove it afterwards) |
 | `LOG_LEVEL` | `info` | `debug` logs every request |
 
 Behind a reverse proxy with TLS, set `PUBLIC_URL` and `TRUSTED_PROXIES`, and in Jackett's settings set **Base URL override** to the same public URL so the links Jackett returns to clients are right.

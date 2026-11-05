@@ -10,6 +10,7 @@ import { NotFoundPage } from "@/pages/NotFoundPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { SearchPage, type SearchPageSearch } from "@/pages/SearchPage";
 import { SettingsPage, type SettingsPageSearch } from "@/pages/SettingsPage";
+import { WelcomePage, type WelcomePageSearch } from "@/pages/welcome/WelcomePage";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -75,9 +76,16 @@ const logsRoute = createRoute({
   ),
 });
 const profileRoute = createRoute({ getParentRoute: () => rootRoute, path: "/profile", component: ProfilePage });
+const welcomeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/welcome",
+  // step = methods; linked / authError come back from the provider link flow (read once, then stripped).
+  validateSearch: (s: Record<string, unknown>): WelcomePageSearch => ({ step: str(s.step), linked: str(s.linked), authError: str(s.authError) }),
+  component: WelcomePage,
+});
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite/$token", component: InvitePage });
 
-const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute, profileRoute, inviteRoute]);
+const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute, profileRoute, welcomeRoute, inviteRoute]);
 
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
   return createRouter({

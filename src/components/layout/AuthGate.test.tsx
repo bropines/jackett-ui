@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -71,6 +71,7 @@ describe("AuthGate", () => {
     await user.click(screen.getByRole("button", { name: /Создать и войти/ }));
     expect(setup).toHaveBeenCalledWith({ username: "boss", password: "longenough1" });
     expect(await screen.findByText("APP")).toBeInTheDocument();
+    expect(window.location.pathname + window.location.search).toBe("/welcome?step=methods");
   });
 
   it("shows the password login and logs in", async () => {
@@ -148,6 +149,100 @@ describe("AuthGate", () => {
     );
     wrap(<App />);
     expect(await screen.findByText(/прокси-сервер авторизации/)).toBeInTheDocument();
+  });
+
+  it("shows the first-login wizard when onboarding is true and posts the account", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ onboarding: true }));
+    const onboarding = vi.spyOn(serverApi, "onboarding").mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    wrap(<App />);
+
+    expect(await screen.findByText("Своя учётная запись")).toBeInTheDocument();
+    expect(screen.queryByText("APP")).toBeNull();
+    // Fields appear after the mode is chosen.
+    expect(screen.queryByLabelText("Имя пользователя")).toBeNull();
+    await user.click(screen.getByRole("radio", { name: /Заменить admin/ }));
+    expect(screen.getByText(/перестанет работать/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Имя пользователя"), "Bropines");
+    await user.type(screen.getByLabelText("Имя"), "Bropines");
+    await user.type(screen.getByLabelText("Почта"), "bad");
+    await user.type(screen.getByLabelText("Пароль"), "longenough1");
+    await user.type(screen.getByLabelText("Ещё раз"), "longenough1");
+    await user.click(screen.getByRole("button", { name: /Сохранить/ }));
+    expect(screen.getByText("Адрес вида name@example.com")).toBeInTheDocument();
+    expect(onboarding).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByLabelText("Почта"));
+    await user.type(screen.getByLabelText("Почта"), "Me@Example.com");
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ onboarding: false }));
+    await user.click(screen.getByRole("button", { name: /Сохранить/ }));
+    expect(onboarding).toHaveBeenCalledWith({ mode: "replace", username: "bropines", name: "Bropines", email: "me@example.com", password: "longenough1" });
+    expect(await screen.findByText("APP")).toBeInTheDocument();
+    expect(window.location.pathname + window.location.search).toBe("/welcome?step=methods");
+  });
+
+  it("shows username_taken next to the field in the wizard", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ onboarding: true }));
+    vi.spyOn(serverApi, "onboarding").mockRejectedValue(new ApiError(409, "Такое имя пользователя уже занято", undefined, "username_taken"));
+    const user = userEvent.setup();
+    wrap(<App />);
+    await user.click(await screen.findByRole("radio", { name: /Добавить ещё одного администратора/ }));
+    await user.type(screen.getByLabelText("Имя пользователя"), "thero");
+    await user.type(screen.getByLabelText("Пароль"), "longenough1");
+    await user.type(screen.getByLabelText("Ещё раз"), "longenough1");
+    await user.click(screen.getByRole("button", { name: /Создать и войти/ }));
+    expect(await screen.findByText("Такое имя пользователя уже занято")).toBeInTheDocument();
+    expect(serverApi.onboarding).toHaveBeenCalledWith({ mode: "add", username: "thero", name: "", password: "longenough1" });
+  });
+
+  it("skips the wizard after confirmation", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState({ onboarding: true }));
+    const onboarding = vi.spyOn(serverApi, "onboarding").mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    wrap(<App />);
+    await user.click(await screen.findByRole("button", { name: "Пропустить" }));
+    const dialog = await screen.findByRole("alertdialog");
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
+    await user.click(within(dialog).getByRole("button", { name: "Пропустить" }));
+    expect(onboarding).toHaveBeenCalledWith({ mode: "skip" });
+    expect(await screen.findByText("APP")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/");
+  });
+
+  it("logs in with a passkey and stays quiet when the user cancels", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(
+      authState({ authenticated: false, user: null, methods: { password: true, passkey: true, providers: [], header: false } }),
+    );
+    vi.spyOn(serverApi, "passkeyLoginBegin").mockResolvedValue({ ceremony: "c1", publicKey: { challenge: "AQID" } });
+    const finish = vi.spyOn(serverApi, "passkeyLoginFinish").mockRejectedValueOnce(new ApiError(401, "x", undefined, "passkey_invalid"));
+    const assertion = {
+      id: "Bwg",
+      rawId: new Uint8Array([7, 8]).buffer,
+      type: "public-key",
+      response: { clientDataJSON: new Uint8Array([1]).buffer, authenticatorData: new Uint8Array([2]).buffer, signature: new Uint8Array([3]).buffer, userHandle: null },
+      getClientExtensionResults: () => ({}),
+    };
+    const get = vi.fn().mockRejectedValueOnce(new DOMException("cancelled", "NotAllowedError")).mockResolvedValue(assertion);
+    vi.stubGlobal("PublicKeyCredential", function PublicKeyCredential() {});
+    vi.stubGlobal("navigator", { ...navigator, credentials: { get, create: vi.fn() } });
+    const user = userEvent.setup();
+    wrap(<App />);
+
+    const button = await screen.findByRole("button", { name: /Войти с passkey/ });
+    await user.click(button);
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await user.click(button);
+    expect(await screen.findByText(/Passkey не подошёл/)).toBeInTheDocument();
+    expect(finish).toHaveBeenCalledWith({ ceremony: "c1", credential: expect.objectContaining({ id: "Bwg", rawId: "Bwg" }) });
+
+    finish.mockResolvedValueOnce(undefined);
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authState());
+    await user.click(button);
+    expect(await screen.findByText("APP")).toBeInTheDocument();
+    vi.unstubAllGlobals();
   });
 
   it("lets everyone in when login is disabled", async () => {

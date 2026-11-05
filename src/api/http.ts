@@ -65,6 +65,13 @@ const CODE_TEXT: Record<string, string> = {
   jackett_unreachable: "Jackett недоступен",
   jackett_login_failed: "Неверный пароль Jackett (JACKETT_PASSWORD)",
   csrf: "Запрос отклонён (CSRF)",
+  invalid_email: "Неверный адрес почты",
+  email_taken: "Эта почта уже указана у другого пользователя",
+  not_onboarding: "Первичная настройка уже завершена",
+  passkey_invalid: "Passkey не подошёл. Попробуйте ещё раз",
+  passkey_login_disabled: "Вход по passkey выключен",
+  passkeys_unavailable: "Passkey недоступен на этом адресе",
+  too_many_passkeys: "Слишком много passkey: удалите ненужные",
 };
 
 export function codeText(code: string | undefined): string | undefined {

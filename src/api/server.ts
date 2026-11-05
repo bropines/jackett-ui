@@ -11,9 +11,9 @@ export type ProviderId = "oidc" | "google" | "github";
 export const PROVIDER_IDS: readonly ProviderId[] = ["oidc", "google", "github"];
 
 /** Login methods toggled independently in `auth.methods`. */
-export type MethodId = "password" | ProviderId | "header";
+export type MethodId = "password" | "passkey" | ProviderId | "header";
 
-export const METHOD_IDS: readonly MethodId[] = ["password", "oidc", "google", "github", "header"];
+export const METHOD_IDS: readonly MethodId[] = ["password", "passkey", "oidc", "google", "github", "header"];
 
 /** viewer = «Поиск», editor = «Редактор», admin = «Админ». */
 export type Role = "viewer" | "editor" | "admin";
@@ -26,6 +26,8 @@ export interface AuthUser {
   username: string;
   name: string;
   role: Role;
+  /** Optional, informational (v0.4). */
+  email?: string;
 }
 
 /** `GET /_ui/api/auth/state` */
@@ -35,8 +37,12 @@ export interface AuthState {
   /** Login is off: everyone is an anonymous admin. */
   disabled: boolean;
   user?: AuthUser | null;
+  /** Logged in as the bootstrap user (AUTH_PASSWORD) and the first-login wizard isn't done: show it (v0.4). */
+  onboarding?: boolean;
   methods: {
     password: boolean;
+    /** Passkey login is on, available for this address and someone has a passkey (v0.4). */
+    passkey?: boolean;
     /** Enabled and verified providers, one login button each. */
     providers: { id: ProviderId; name: string }[];
     header: boolean;
@@ -85,6 +91,9 @@ export interface UserEntry extends AuthUser {
   lastLoginAt?: string | null;
   createdAt?: string | null;
   passwordSet?: boolean;
+  /** The password comes from AUTH_PASSWORD[_HASH] (the initial admin). */
+  bootstrap?: boolean;
+  passkeyCount?: number;
 }
 
 export interface UserCreate {
@@ -92,13 +101,47 @@ export interface UserCreate {
   name: string;
   role: Role;
   password?: string;
+  email?: string;
 }
 
 export interface UserPatch {
   name?: string;
+  /** "" clears it. */
+  email?: string;
   role?: Role;
   disabled?: boolean;
   password?: string;
+}
+
+/** `GET /_ui/api/me/passkeys` entry. */
+export interface Passkey {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  /** Backed up / synced by the platform (iCloud Keychain, Google Password Manager…). */
+  synced?: boolean;
+  /** The sign counter went backwards: the authenticator may have been cloned; logins with it are refused. */
+  cloneWarning?: boolean;
+}
+
+/** Start of a WebAuthn ceremony: `publicKey` is the options object in its JSON form. */
+export interface PasskeyCeremony {
+  ceremony: string;
+  publicKey: unknown;
+}
+
+/** `POST /_ui/api/onboarding` */
+export type OnboardingRequest =
+  | { mode: "skip" }
+  | { mode: "replace" | "add"; username: string; name: string; email?: string; password: string };
+
+/** `POST /_ui/api/auth/setup` */
+export interface SetupRequest {
+  username?: string;
+  name?: string;
+  email?: string;
+  password: string;
 }
 
 /** `GET /_ui/api/invites` (admin): pending invites. */
@@ -173,6 +216,8 @@ export interface UiSettings {
       name: Locked<string>;
       trusted: Locked<string[]>;
     };
+    /** Whether passkeys work at the current public address (v0.4). */
+    passkey?: { available: boolean; rpId?: string; reason?: string };
   };
   publicUrl: Locked<string>;
   sessionTtl: Locked<string>;
@@ -269,7 +314,7 @@ export const serverApi = {
   authState: () => call<AuthState>("/auth/state"),
 
   /** First start: creates the first admin and logs in (204 + cookie). */
-  setup: (data: { username?: string; password: string }) => call<void>("/auth/setup", body("POST", data)),
+  setup: (data: SetupRequest) => call<void>("/auth/setup", body("POST", data)),
 
   login: (data: { username: string; password: string }) => call<void>("/auth/login", body("POST", data)),
 
@@ -278,14 +323,30 @@ export const serverApi = {
   /** Ends every session of the current user (bumps the user's epoch), including this one. */
   logoutAll: () => call<void>("/auth/logout-all", post),
 
+  /** Passkey login, step 1 (public): a ceremony id plus the request options. */
+  passkeyLoginBegin: () => call<PasskeyCeremony>("/auth/passkey/begin", post),
+
+  /** Passkey login, step 2 (public): 204 + session cookie. */
+  passkeyLoginFinish: (data: { ceremony: string; credential: unknown }) => call<void>("/auth/passkey/finish", body("POST", data)),
+
+  /** First-login wizard: replace the initial admin, add another admin, or skip. */
+  onboarding: (data: OnboardingRequest) => protectedCall<void>("/onboarding", body("POST", data)),
+
   /* ── Me ── */
 
   me: () => protectedCall<Me>("/me"),
-  updateMe: (patch: { name?: string }) => protectedCall<void>("/me", body("PATCH", patch)),
+  updateMe: (patch: { name?: string; email?: string }) => protectedCall<void>("/me", body("PATCH", patch)),
   changeMyPassword: (data: { current?: string; new: string }) => protectedCall<void>("/me/password", body("POST", data)),
   unlinkMyIdentity: (provider: ProviderId) => protectedCall<void>(`/me/identities/${enc(provider)}`, del),
   createMyToken: (data: { name: string; expiresInDays?: number }) => protectedCall<CreatedToken>("/me/tokens", body("POST", data)),
   deleteMyToken: (id: string) => protectedCall<void>(`/me/tokens/${enc(id)}`, del),
+  myPasskeys: async () => asList<Passkey>(await protectedCall<unknown>("/me/passkeys"), "passkeys"),
+  /** 409 `passkeys_unavailable` (message = why) when passkeys don't work at this address. */
+  beginMyPasskey: () => protectedCall<PasskeyCeremony>("/me/passkeys/begin", post),
+  finishMyPasskey: (data: { ceremony: string; name: string; credential: unknown }) => protectedCall<Passkey>("/me/passkeys/finish", body("POST", data)),
+  renameMyPasskey: (id: string, name: string) => protectedCall<Passkey>(`/me/passkeys/${enc(id)}`, body("PATCH", { name })),
+  /** 409 `would_lock_out` when it is the last way in. */
+  deleteMyPasskey: (id: string) => protectedCall<void>(`/me/passkeys/${enc(id)}`, del),
 
   /* ── Users (admin) ── */
 
@@ -296,6 +357,7 @@ export const serverApi = {
   logoutUser: (id: string) => protectedCall<void>(`/users/${enc(id)}/logout`, post),
   unlinkUserIdentity: (id: string, provider: ProviderId) => protectedCall<void>(`/users/${enc(id)}/identities/${enc(provider)}`, del),
   userTokens: async (id: string) => asList<ApiToken>(await protectedCall<unknown>(`/users/${enc(id)}/tokens`), "tokens"),
+  deleteUserPasskey: (id: string, passkeyId: string) => protectedCall<void>(`/users/${enc(id)}/passkeys/${enc(passkeyId)}`, del),
   /** Revokes any user's token (admin). */
   deleteToken: (id: string) => protectedCall<void>(`/tokens/${enc(id)}`, del),
 

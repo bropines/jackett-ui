@@ -47,6 +47,25 @@ describe("UsersTab", () => {
     expect(screen.getByText("Вася")).toBeInTheDocument();
   });
 
+  it("shows e-mail, passkey count and the AUTH_PASSWORD badge; edits name and e-mail", async () => {
+    const update = vi.spyOn(serverApi, "updateUser").mockRejectedValueOnce(new ApiError(409, "Эта почта уже указана у другого пользователя", undefined, "email_taken"));
+    const user = userEvent.setup();
+    wrap();
+    const list = await screen.findByRole("list", { name: "Пользователи" });
+    const first = within(list).getAllByRole("listitem")[0]!;
+    expect(within(first).getByText("admin@example.com")).toBeInTheDocument();
+    expect(within(first).getByText("из AUTH_PASSWORD")).toBeInTheDocument();
+    expect(within(first).getByText("Passkey: 1")).toBeInTheDocument();
+
+    const menu = await openActions(user, "Thero");
+    await user.click(within(menu).getByRole("menuitem", { name: /Имя и почта/ }));
+    const dialog = await screen.findByRole("dialog", { name: /Изменить: thero/ });
+    await user.type(within(dialog).getByLabelText("Почта"), "Thero@Example.com");
+    await user.click(within(dialog).getByRole("button", { name: /Сохранить/ }));
+    expect(await within(dialog).findByText("Эта почта уже указана у другого пользователя")).toBeInTheDocument();
+    expect(update).toHaveBeenCalledWith(users()[1]!.id, { email: "thero@example.com" });
+  });
+
   it("changes a role with PATCH {role}", async () => {
     const update = vi.spyOn(serverApi, "updateUser").mockResolvedValue(undefined);
     const user = userEvent.setup();
