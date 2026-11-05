@@ -245,7 +245,8 @@ export const ResultsView = memo(function ResultsView({
   const [paging, setPaging] = useState({ key: listKey, limit: PAGE });
   const limit = paging.key === listKey ? paging.limit : PAGE;
   const more = () => setPaging({ key: listKey, limit: limit + PAGE });
-  const page = visible.slice(0, limit);
+  // Stable array: the table treats a new `data` array as new data (see autoResetPageIndex below).
+  const page = useMemo(() => visible.slice(0, limit), [visible, limit]);
 
   // Preview panel: the row stays set while the close animation runs.
   const [preview, setPreview] = useState<{ row: ResultRow | null; open: boolean }>({ row: null, open: false });
@@ -259,6 +260,9 @@ export const ResultsView = memo(function ResultsView({
     state: { sorting },
     onSortingChange: setSorting,
     manualSorting: true,
+    // No pagination model here. Left on, every new `data` queued a page reset that changed the
+    // table state, re-rendered this view with a fresh slice and looped (the tab hung with a preview open).
+    autoResetAll: false,
     enableSortingRemoval: false,
     enableMultiSort: false,
     getCoreRowModel: getCoreRowModel(),
