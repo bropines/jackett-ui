@@ -1,5 +1,5 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ExternalLink, Search, X } from "lucide-react";
+import { ExternalLink, Plus, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { IndexerSummary, IndexerType } from "@/api";
@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/misc";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useDebounced } from "@/lib/hooks";
 import { formatNumber } from "@/lib/format";
@@ -23,18 +24,22 @@ import {
   type CatalogFilter,
   type CategoryKey,
 } from "@/pages/indexers/logic";
+import { pickSelected, toggleId } from "@/pages/indexers/selection";
 
 export function CatalogDialog({
   open,
   onOpenChange,
   indexers,
   onPick,
+  onAddMany,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Unconfigured indexers. */
   indexers: IndexerSummary[];
   onPick: (ix: IndexerSummary) => void;
+  /** Adds several ticked trackers at once. */
+  onAddMany?: (list: IndexerSummary[]) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -49,14 +54,24 @@ export function CatalogDialog({
           (e.currentTarget as HTMLElement).querySelector<HTMLInputElement>("input[type=search]")?.focus();
         }}
       >
-        {open && <CatalogBody indexers={indexers} onPick={onPick} />}
+        {open && <CatalogBody indexers={indexers} onPick={onPick} onAddMany={onAddMany} />}
       </DialogContent>
     </Dialog>
   );
 }
 
-function CatalogBody({ indexers, onPick }: { indexers: IndexerSummary[]; onPick: (ix: IndexerSummary) => void }) {
+function CatalogBody({
+  indexers,
+  onPick,
+  onAddMany,
+}: {
+  indexers: IndexerSummary[];
+  onPick: (ix: IndexerSummary) => void;
+  onAddMany?: (list: IndexerSummary[]) => void;
+}) {
   const [filter, setFilter] = useState<CatalogFilter>(EMPTY_FILTER);
+  const [picked, setPicked] = useState<string[]>([]);
+  const togglePick = (id: string) => setPicked((p) => toggleId(p, id));
   const query = useDebounced(filter.query, 150);
   const effective = useMemo(() => ({ ...filter, query }), [filter, query]);
   const results = useMemo(() => filterCatalog(indexers, effective), [indexers, effective]);
@@ -81,8 +96,8 @@ function CatalogBody({ indexers, onPick }: { indexers: IndexerSummary[]; onPick:
       <DialogHeader className="space-y-1 px-4 pt-4 text-left sm:px-6 sm:pt-6">
         <DialogTitle>Добавить трекер</DialogTitle>
         <DialogDescription>
-          {formatNumber(indexers.length)} трекеров в Jackett. Выберите нужный и введите данные для входа, если он
-          приватный.
+          {formatNumber(indexers.length)} трекеров в Jackett. Нажмите на трекер, чтобы настроить его, или отметьте
+          несколько и добавьте разом.
         </DialogDescription>
       </DialogHeader>
 
@@ -177,13 +192,33 @@ function CatalogBody({ indexers, onPick }: { indexers: IndexerSummary[]; onPick:
                   className="absolute left-0 top-0 w-full"
                   style={{ transform: `translateY(${row.start}px)` }}
                 >
-                  <CatalogRow ix={ix} onPick={onPick} />
+                  <CatalogRow
+                    ix={ix}
+                    onPick={onPick}
+                    checked={picked.includes(ix.id)}
+                    onCheck={onAddMany ? () => togglePick(ix.id) : undefined}
+                  />
                 </li>
               );
             })}
           </ul>
         )}
       </div>
+
+      {onAddMany && picked.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-t bg-background px-4 py-3 sm:px-6">
+          <span className="mr-auto text-sm" aria-live="polite">
+            Выбрано: {picked.length}
+          </span>
+          <Button variant="ghost" size="sm" onClick={() => setPicked([])}>
+            Снять выделение
+          </Button>
+          <Button size="sm" onClick={() => onAddMany(pickSelected(indexers, picked))}>
+            <Plus />
+            Добавить выбранные ({picked.length})
+          </Button>
+        </div>
+      )}
     </>
   );
 }
@@ -204,9 +239,27 @@ function CategoryChip({ active, onClick, children }: { active: boolean; onClick:
   );
 }
 
-function CatalogRow({ ix, onPick }: { ix: IndexerSummary; onPick: (ix: IndexerSummary) => void }) {
+function CatalogRow({
+  ix,
+  onPick,
+  checked,
+  onCheck,
+}: {
+  ix: IndexerSummary;
+  onPick: (ix: IndexerSummary) => void;
+  checked: boolean;
+  onCheck?: () => void;
+}) {
   return (
-    <div className="flex items-start gap-2 border-b px-4 py-2.5 hover:bg-accent/50 sm:px-6">
+    <div className={cn("flex items-start gap-3 border-b px-4 py-2.5 hover:bg-accent/50 sm:px-6", checked && "bg-primary/5")}>
+      {onCheck && (
+        <Checkbox
+          className="mt-0.5 h-5 w-5 sm:mt-1 sm:h-4 sm:w-4"
+          checked={checked}
+          onCheckedChange={onCheck}
+          aria-label={`Отметить ${ix.name}`}
+        />
+      )}
       <button
         type="button"
         className="min-w-0 flex-1 rounded-sm text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"

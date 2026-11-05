@@ -61,7 +61,7 @@ function NoAuthBanner() {
       <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
       <span className="min-w-0">
         Вход отключён: любой, кто откроет адрес, управляет Jackett.{" "}
-        <Link to="/settings" search={{ tab: "panel" }} className="underline underline-offset-2">
+        <Link to="/settings" search={{ tab: "login" }} className="underline underline-offset-2">
           Включить вход
         </Link>
       </span>

@@ -43,8 +43,11 @@ type Env struct {
 	DataDir         string
 	TrustedProxies  []netip.Prefix
 	StaticDir       string
-	LogLevel        slog.Level
-	AuthReset       bool
+	// CardigannDir: Jackett's custom definitions folder (CARDIGANN_DIR), shared
+	// with the Jackett container; "" = the "own trackers" editor is off.
+	CardigannDir string
+	LogLevel     slog.Level
+	AuthReset    bool
 
 	PublicURL    *url.URL // nil = unset
 	PublicURLRaw string
@@ -322,6 +325,7 @@ func ParseEnv(lookup Lookup) (*Env, error) {
 	}
 
 	e.StaticDir, _ = get("STATIC_DIR")
+	e.CardigannDir, _ = get("CARDIGANN_DIR")
 
 	e.LogLevel = slog.LevelInfo
 	if v, ok := get("LOG_LEVEL"); ok {

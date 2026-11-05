@@ -57,7 +57,7 @@ export function UserMenu() {
         )}
         {role === "admin" && (
           <DropdownMenuItem asChild>
-            <Link to="/settings" search={{ tab: "panel" }}>
+            <Link to="/settings" search={{ tab: "login" }}>
               <Settings className="mr-2 h-4 w-4" /> Настройки панели
             </Link>
           </DropdownMenuItem>

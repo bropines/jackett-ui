@@ -4,12 +4,13 @@ import { createRootRouteWithContext, createRoute, createRouter, type RouterHisto
 import { RequireRole } from "@/components/auth/RequireRole";
 import { RootLayout } from "@/components/layout/RootLayout";
 import { InvitePage } from "@/pages/auth/InvitePage";
+import { DefinitionsPage, type DefinitionsPageSearch } from "@/pages/definitions/DefinitionsPage";
 import { IndexersPage, type IndexersPageSearch } from "@/pages/IndexersPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { ProfilePage } from "@/pages/ProfilePage";
 import { SearchPage, type SearchPageSearch } from "@/pages/SearchPage";
-import { SettingsPage, type SettingsPageSearch } from "@/pages/SettingsPage";
+import { parseSettingsTab, SettingsPage, type SettingsPageSearch } from "@/pages/SettingsPage";
 import { WelcomePage, type WelcomePageSearch } from "@/pages/welcome/WelcomePage";
 
 export interface RouterContext {
@@ -50,16 +51,11 @@ const indexersRoute = createRoute({
   component: IndexersPage,
 });
 
-const TABS = new Set(["panel", "users", "jackett"]);
-
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
-  // tab = panel | users | jackett
-  validateSearch: (s: Record<string, unknown>): SettingsPageSearch => {
-    const tab = str(s.tab);
-    return { tab: tab && TABS.has(tab) ? (tab as SettingsPageSearch["tab"]) : undefined };
-  },
+  // tab = login | users | jackett | general; the old "panel" opens "login".
+  validateSearch: (s: Record<string, unknown>): SettingsPageSearch => ({ tab: parseSettingsTab(str(s.tab)) }),
   component: () => (
     <RequireRole min="admin">
       <SettingsPage />
@@ -75,6 +71,17 @@ const logsRoute = createRoute({
     </RequireRole>
   ),
 });
+const definitionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/definitions",
+  // edit = open the editor for this id; new=1 = a new file from the template.
+  validateSearch: (s: Record<string, unknown>): DefinitionsPageSearch => ({ edit: str(s.edit), new: str(s.new) }),
+  component: () => (
+    <RequireRole min="admin">
+      <DefinitionsPage />
+    </RequireRole>
+  ),
+});
 const profileRoute = createRoute({ getParentRoute: () => rootRoute, path: "/profile", component: ProfilePage });
 const welcomeRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -85,7 +92,7 @@ const welcomeRoute = createRoute({
 });
 const inviteRoute = createRoute({ getParentRoute: () => rootRoute, path: "/invite/$token", component: InvitePage });
 
-const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute, profileRoute, welcomeRoute, inviteRoute]);
+const routeTree = rootRoute.addChildren([searchRoute, indexersRoute, settingsRoute, logsRoute, definitionsRoute, profileRoute, welcomeRoute, inviteRoute]);
 
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
   return createRouter({

@@ -1,4 +1,4 @@
-import { Download, ExternalLink, Magnet } from "lucide-react";
+import { Download, ExternalLink, Magnet, PanelRightOpen } from "lucide-react";
 
 import { localizeLink, type SearchResult } from "@/api";
 import { CopyButton } from "@/components/common";
@@ -27,11 +27,30 @@ function IconLink({ href, label, newTab, children }: { href: string; label: stri
   );
 }
 
-/** Magnet / .torrent / copy magnet / tracker page. Buttons without data are hidden. */
-export function ResultActions({ r, className }: { r: SearchResult; className?: string }) {
+/** Magnet / .torrent / copy magnet / tracker page / preview. Buttons without data are hidden. */
+export function ResultActions({ r, className, onPreview }: { r: SearchResult; className?: string; onPreview?: () => void }) {
   const torrent = localizeLink(r.Link);
   return (
     <div className={cn("flex items-center justify-end gap-0.5", className)}>
+      {onPreview && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className={btn}
+              aria-label="Подробнее"
+              aria-haspopup="dialog"
+              onClick={(e) => {
+                e.stopPropagation();
+                onPreview();
+              }}
+            >
+              <PanelRightOpen />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Подробнее</TooltipContent>
+        </Tooltip>
+      )}
       {r.MagnetUri && (
         <IconLink href={r.MagnetUri} label="Открыть magnet">
           <Magnet />

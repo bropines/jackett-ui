@@ -460,6 +460,10 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 	case len(seg) == 3 && seg[0] == "me" && seg[1] == "tokens":
 		dispatch(w, r, handlers{"DELETE": func() { s.handleTokenDelete(w, r, re, pr, seg[2], true) }})
 
+	// ---- torrent preview (any role) ----
+	case rest == "torrent/files":
+		dispatch(w, r, handlers{"GET": func() { s.handleTorrentFiles(w, r, re, pr) }})
+
 	// ---- users (admin) ----
 	case rest == "users":
 		dispatch(w, r, handlers{
@@ -490,6 +494,18 @@ func (s *Server) uiRoute(w http.ResponseWriter, r *http.Request, p string, re *r
 		})
 	case len(seg) == 2 && seg[0] == "invites": // DELETE (others are public, above)
 		dispatch(w, r, handlers{"DELETE": admin(func() { s.handleInviteDelete(w, r, re, pr, seg[1]) })})
+
+	// ---- own trackers (admin) ----
+	case rest == "definitions":
+		dispatch(w, r, handlers{"GET": admin(func() { s.handleDefinitionsList(w) })})
+	case rest == "definitions/reload":
+		dispatch(w, r, handlers{"POST": admin(func() { s.handleDefinitionsReload(w, r, pr) })})
+	case len(seg) == 2 && seg[0] == "definitions":
+		dispatch(w, r, handlers{
+			"GET":    admin(func() { s.handleDefinitionGet(w, seg[1]) }),
+			"PUT":    admin(func() { s.handleDefinitionPut(w, r, pr, seg[1]) }),
+			"DELETE": admin(func() { s.handleDefinitionDelete(w, pr, seg[1]) }),
+		})
 
 	// ---- settings (admin) ----
 	case rest == "settings":

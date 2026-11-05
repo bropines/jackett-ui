@@ -104,16 +104,23 @@ describe("settings by role", () => {
     const router = renderApp("/settings?tab=users");
     const users = await screen.findByRole("tab", { name: /Пользователи/ });
     expect(users).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: /Панель/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Вход/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Jackett/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Общее/ })).toBeInTheDocument();
     await waitFor(() => expect(serverApi.users).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("tab", { name: /Панель/ }));
-    expect(await screen.findByRole("checkbox", { name: /Пароль/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /Вход/ }));
+    expect(await screen.findByRole("switch", { name: "Вход по паролю" })).toBeInTheDocument();
     await waitFor(() => expect(router.state.location.search).toEqual({}));
 
     await user.click(screen.getByRole("tab", { name: /Jackett/ }));
     await waitFor(() => expect(router.state.location.search).toEqual({ tab: "jackett" }));
+  });
+
+  it("opens the old ?tab=panel as «Вход»", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authAs("admin"));
+    renderApp("/settings?tab=panel");
+    expect(await screen.findByRole("tab", { name: /Вход/ })).toHaveAttribute("aria-selected", "true");
   });
 });
 

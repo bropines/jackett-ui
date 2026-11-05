@@ -1,4 +1,4 @@
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, Loader2, RotateCcw, Save } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -108,6 +108,46 @@ export function SwitchRow({
         {description && <p className="text-xs text-muted-foreground">{description}</p>}
       </div>
       <Switch id={id} checked={checked} onCheckedChange={onChange} disabled={disabled} className="mt-0.5" />
+    </div>
+  );
+}
+
+/** Save / reset row at the bottom of a settings card that saves on its own. */
+export function SectionFooter({
+  dirty,
+  invalid,
+  saving,
+  error,
+  onReset,
+}: {
+  dirty: boolean;
+  invalid: boolean;
+  saving: boolean;
+  error?: string;
+  onReset: () => void;
+}) {
+  return (
+    <div className="space-y-3 border-t pt-4">
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          Не удалось сохранить: {error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {dirty && (
+          <span className={cn("mr-auto text-xs", invalid ? "text-destructive" : "text-muted-foreground")}>
+            {invalid ? "Исправьте ошибки" : "Есть несохранённые изменения"}
+          </span>
+        )}
+        {dirty && (
+          <Button type="button" variant="ghost" size="sm" onClick={onReset} disabled={saving}>
+            <RotateCcw /> Сбросить
+          </Button>
+        )}
+        <Button type="submit" size="sm" disabled={!dirty || invalid || saving}>
+          {saving ? <Loader2 className="animate-spin" /> : <Save />} Сохранить
+        </Button>
+      </div>
     </div>
   );
 }

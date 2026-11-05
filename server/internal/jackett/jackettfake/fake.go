@@ -43,6 +43,10 @@ type Fake struct {
 	// LoginDelay delays login responses (to test coalescing).
 	LoginDelay time.Duration
 
+	// DL, when set, answers /dl/* requests that carry the right key
+	// (instead of TorrentBody).
+	DL http.HandlerFunc
+
 	Logins atomic.Int64
 
 	mu       sync.Mutex
@@ -150,6 +154,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Set-Cookie", "evil=1; Path=/")
 		w.Header().Set("X-Jackett-Link", "http://127.0.0.1:9117/dl/x/?jackett_apikey="+APIKey)
 		switch {
+		case strings.HasPrefix(p, "/dl/") && f.DL != nil:
+			f.DL(w, r)
 		case strings.HasPrefix(p, "/dl/"):
 			send(w, r, http.StatusOK, "application/x-bittorrent", []byte(TorrentBody))
 		case strings.Contains(p, "/results/torznab"):

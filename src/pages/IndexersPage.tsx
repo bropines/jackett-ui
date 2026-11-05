@@ -1,22 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ListChecks, Loader2, Plus, Radar, Square } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { api, errText, qk, type IndexerSummary } from "@/api";
-import { ConfirmDialog, EmptyState, ErrorState, PageHeader, toastError } from "@/components/common";
+import { api, errText, qk, torznabUrl, type IndexerSummary } from "@/api";
+import { ConfirmDialog, copyText, EmptyState, ErrorState, PageHeader, toastError } from "@/components/common";
 import { SearchInput } from "@/components/data-table";
 import { IndexerConfigDialog } from "@/components/indexer-config/IndexerConfigDialog";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/misc";
+import { Checkbox, Skeleton } from "@/components/ui/misc";
 import { useCan } from "@/lib/auth-hooks";
 import { plural } from "@/lib/format";
+import { BulkAddDialog } from "@/pages/indexers/BulkAddDialog";
+import { BulkBar } from "@/pages/indexers/BulkBar";
 import { CatalogDialog } from "@/pages/indexers/CatalogDialog";
 import { IndexerRow } from "@/pages/indexers/IndexerRow";
 import { effectiveStatus, filterConfigured, firstLine, runQueue, type TestState } from "@/pages/indexers/logic";
 import { QbitHelp } from "@/pages/indexers/QbitHelp";
+import { namesPreview, pickSelected, pruneSelection, toggleId, toggleVisible, visibleCheckState } from "@/pages/indexers/selection";
+import { useBulkAdd } from "@/pages/indexers/useBulkAdd";
 
 export interface IndexersPageSearch {
   add?: string;
@@ -64,6 +68,25 @@ export function IndexersPage() {
   /** Set when the config dialog was opened from the catalog: closing it without saving goes back there. */
   const backToCatalog = useRef(false);
 
+  /* Multi-select: ids of configured trackers; ones that disappear (deleted) drop out. */
+  const [selectedRaw, setSelected] = useState<string[]>([]);
+  const selected = useMemo(() => pruneSelection(selectedRaw, configured), [selectedRaw, configured]);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [deleting, setDeleting] = useState<{ done: number; total: number } | null>(null);
+
+  /* Adding several trackers from the catalog; those that need input are configured one by one. */
+  const bulkAdd = useBulkAdd();
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [setupMode, setSetupMode] = useState(false);
+  /** The config dialog calls onSaved and then closes itself: skip that close while moving to the next tracker. */
+  const skipClose = useRef(false);
+  const setupLeft = bulkAdd.items?.filter((it) => it.status === "setup").length ?? 0;
+  useEffect(() => {
+    if (setupMode && setupLeft > 0) toast.message(`Осталось настроить: ${setupLeft}`, { id: "setup-queue", duration: Infinity });
+    else toast.dismiss("setup-queue");
+  }, [setupMode, setupLeft]);
+  useEffect(() => () => void toast.dismiss("setup-queue"), []);
+
   const setSearch = useCallback(
     (patch: Partial<IndexersPageSearch>, replace = false) =>
       void navigate({ search: (prev: IndexersPageSearch) => ({ ...prev, ...patch }), replace }),
@@ -75,6 +98,7 @@ export function IndexersPage() {
     const list = filterConfigured(configured, filter);
     return onlyErrors ? list.filter((ix) => effectiveStatus(ix, tests[ix.id]).kind === "error") : list;
   }, [configured, filter, onlyErrors, tests]);
+  const selectedItems = useMemo(() => pickSelected(filterConfigured(configured, ""), selected), [configured, selected]);
 
   /* ── Tests ── */
 
@@ -98,9 +122,9 @@ export function IndexersPage() {
     );
   };
 
-  const testAll = async () => {
-    const list = [...configured];
-    if (list.length === 0) return;
+  const testMany = async (items: IndexerSummary[]) => {
+    const list = [...items];
+    if (list.length === 0 || bulk) return;
     stopBulk.current = false;
     setBulk({ done: 0, total: list.length });
     const results = await runQueue(list, runTest, {
@@ -131,6 +155,62 @@ export function IndexersPage() {
     onError: toastError,
   });
 
+  /* ── Bulk actions on the selection ── */
+
+  const deleteSelected = async () => {
+    const list = selectedItems;
+    if (list.length === 0) return;
+    setDeleting({ done: 0, total: list.length });
+    const results = await runQueue(list, (ix) => api.deleteIndexer(ix.id), {
+      concurrency: 1,
+      onProgress: (done, total) => setDeleting({ done, total }),
+    });
+    setDeleting(null);
+    setConfirmBulkDelete(false);
+    const gone = new Set(results.filter((r) => r.ok).map((r) => r.item.id));
+    setTests((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !gone.has(id))));
+    setSelected((prev) => prev.filter((id) => !gone.has(id)));
+    void qc.invalidateQueries({ queryKey: qk.indexers });
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length === 0) toast.success(`Удалено: ${trackers(gone.size)}`);
+    else
+      toast.error(`Удалено ${gone.size} из ${list.length}`, {
+        description: failed.map((r) => (r.ok ? "" : `${r.item.name}: ${firstLine(errText(r.error), 120)}`)).join("\n"),
+      });
+  };
+
+  const copySelectedTorznab = async () => {
+    const urls = selectedItems.map((ix) => torznabUrl(ix.id)).filter(Boolean);
+    if (urls.length === 0) {
+      toast.error("Torznab-адреса: пока нет данных");
+      return;
+    }
+    if (await copyText(urls.join("\n"))) toast.success(`Скопировано адресов: ${urls.length}`);
+    else toast.error("Не удалось скопировать");
+  };
+
+  /* ── Bulk add from the catalog ── */
+
+  const addMany = (list: IndexerSummary[]) => {
+    backToCatalog.current = false;
+    setSearch({ add: undefined }, true);
+    setSummaryOpen(true);
+    void bulkAdd.start(list);
+  };
+  const nextSetup = (after?: string) => bulkAdd.items?.find((it) => it.status === "setup" && it.id !== after);
+  const startSetup = () => {
+    const first = nextSetup();
+    if (!first) return;
+    setSummaryOpen(false);
+    setSetupMode(true);
+    backToCatalog.current = false;
+    setSearch({ edit: first.id });
+  };
+  const closeSummary = () => {
+    setSummaryOpen(false);
+    bulkAdd.reset();
+  };
+
   /* ── Dialogs ── */
 
   const editing = editId ? all.find((x) => x.id === editId) : undefined;
@@ -145,6 +225,17 @@ export function IndexersPage() {
     setSearch({ add: undefined, edit: ix.id });
   };
   const closeEdit = () => {
+    if (skipClose.current) {
+      skipClose.current = false;
+      return;
+    }
+    if (setupMode) {
+      // Cancelled one of the queue: back to the summary, where the rest can be configured later.
+      setSetupMode(false);
+      setSummaryOpen(true);
+      setSearch({ edit: undefined }, true);
+      return;
+    }
     const back = backToCatalog.current;
     backToCatalog.current = false;
     setSearch({ edit: undefined, add: back ? "1" : undefined }, true);
@@ -154,6 +245,18 @@ export function IndexersPage() {
     backToCatalog.current = false;
     setTests(({ [id]: _old, ...rest }) => rest);
     void qc.invalidateQueries({ queryKey: qk.indexers });
+    if (setupMode) {
+      bulkAdd.setStatus(id, "added");
+      const next = nextSetup(id);
+      skipClose.current = true;
+      if (next) setSearch({ edit: next.id }, true);
+      else {
+        setSetupMode(false);
+        setSummaryOpen(true);
+        setSearch({ edit: undefined, add: undefined }, true);
+      }
+      return;
+    }
     setSearch({ edit: undefined, add: undefined }, true);
   };
 
@@ -179,7 +282,7 @@ export function IndexersPage() {
                 <Square className="ml-1 fill-current" aria-label="Остановить" />
               </Button>
             ) : (
-              <Button variant="outline" onClick={() => void testAll()}>
+              <Button variant="outline" onClick={() => void testMany(configured)}>
                 <ListChecks />
                 Проверить все
               </Button>
@@ -263,24 +366,52 @@ export function IndexersPage() {
           {visible.length === 0 ? (
             <EmptyState title="Ничего не найдено" description="Измените фильтр." />
           ) : (
-            <ul className="divide-y" aria-label="Подключённые трекеры">
-              {visible.map((ix) => (
-                <IndexerRow
-                  key={ix.id}
-                  ix={ix}
-                  test={tests[ix.id]}
-                  canManage={canManage}
-                  onTest={() => testOne(ix)}
-                  onEdit={() => {
-                    backToCatalog.current = false;
-                    setSearch({ edit: ix.id });
-                  }}
-                  onDelete={() => setToDelete(ix)}
+            <>
+              <div className="flex items-center gap-3 border-b bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+                <Checkbox
+                  id="indexers-select-visible"
+                  className="h-5 w-5 sm:h-4 sm:w-4"
+                  checked={visibleCheckState(selected, visible)}
+                  onCheckedChange={() => setSelected(toggleVisible(selected, visible))}
                 />
-              ))}
-            </ul>
+                <label htmlFor="indexers-select-visible" className="cursor-pointer select-none">
+                  {filter || onlyErrors ? `Выбрать найденные (${visible.length})` : `Выбрать все (${visible.length})`}
+                </label>
+                {selected.length > 0 && <span className="ml-auto">Выбрано: {selected.length}</span>}
+              </div>
+              <ul className="divide-y" aria-label="Подключённые трекеры">
+                {visible.map((ix) => (
+                  <IndexerRow
+                    key={ix.id}
+                    ix={ix}
+                    test={tests[ix.id]}
+                    canManage={canManage}
+                    onTest={() => testOne(ix)}
+                    onEdit={() => {
+                      backToCatalog.current = false;
+                      setSearch({ edit: ix.id });
+                    }}
+                    onDelete={() => setToDelete(ix)}
+                    selected={selected.includes(ix.id)}
+                    onSelect={() => setSelected((prev) => toggleId(prev, ix.id))}
+                  />
+                ))}
+              </ul>
+            </>
           )}
         </Card>
+        {selected.length > 0 && (
+          <BulkBar
+            count={selected.length}
+            canManage={canManage}
+            testing={bulk}
+            onTest={() => void testMany(selectedItems)}
+            onStopTest={() => (stopBulk.current = true)}
+            onDelete={() => setConfirmBulkDelete(true)}
+            onCopy={() => void copySelectedTorznab()}
+            onClear={() => setSelected([])}
+          />
+        )}
       </>
     );
   }
@@ -296,7 +427,19 @@ export function IndexersPage() {
         onOpenChange={(open) => (open ? openCatalog() : setSearch({ add: undefined }, true))}
         indexers={unconfigured}
         onPick={pick}
+        onAddMany={addMany}
       />
+
+      {bulkAdd.items && (
+        <BulkAddDialog
+          open={summaryOpen}
+          items={bulkAdd.items}
+          running={bulkAdd.running}
+          onStop={bulkAdd.stop}
+          onClose={closeSummary}
+          onSetup={startSetup}
+        />
+      )}
 
       <IndexerConfigDialog
         indexerId={editId}
@@ -317,6 +460,22 @@ export function IndexersPage() {
         destructive
         pending={del.isPending}
         onConfirm={() => toDelete && del.mutate(toDelete)}
+      />
+
+      <ConfirmDialog
+        open={confirmBulkDelete}
+        onOpenChange={(open) => !open && !deleting && setConfirmBulkDelete(false)}
+        title={`Удалить ${trackers(selectedItems.length)}?`}
+        description={
+          <>
+            <span className="block break-words font-medium text-foreground">{namesPreview(selectedItems.map((ix) => ix.name))}</span>
+            <span className="mt-2 block">Настройки и данные для входа будут удалены из Jackett. Трекеры можно добавить снова из каталога.</span>
+          </>
+        }
+        confirmLabel={deleting ? `Удаляю ${deleting.done} / ${deleting.total}…` : "Удалить"}
+        destructive
+        pending={deleting !== null}
+        onConfirm={() => void deleteSelected()}
       />
     </div>
   );

@@ -106,6 +106,8 @@ In Kubernetes: `kubectl exec -it deploy/jackett -c ui -- /jackett-ui reset-passw
 
 Clients that use the Jackett API key (qBittorrent's search plugin, Sonarr/Radarr, Torznab feeds, `.torrent` download links) keep working without a login: those URLs carry the key (or a personal API token).
 
+**Own trackers.** A tracker Jackett doesn't ship can be added as a YAML definition (Cardigann format), no compiling. In **Свои трекеры** (admins) you write or paste the file, save it and press «Применить в Jackett»: Jackett restarts its web server for a few seconds and reads the definitions again, then the tracker shows up in the catalog. The files live in `cardigann/definitions` in Jackett's config folder; the aio image and the Helm chart share it with the UI, for separate containers mount it into the UI container and set `CARDIGANN_DIR`.
+
 ## Configuration
 
 Everything is optional. Environment variables win over the settings made in the UI and show as locked there.
@@ -129,6 +131,7 @@ Everything is optional. Environment variables win over the settings made in the 
 | `SESSION_TTL` | `168h` | how long a login lasts |
 | `AUTH_RESET` | | `1` deletes all users and login settings on start (remove it afterwards) |
 | `LOG_LEVEL` | `info` | `debug` logs every request |
+| `CARDIGANN_DIR` | `/config/cardigann/definitions` (aio), `/cardigann` (chart) | Jackett's custom definitions folder, shared with the UI: enables the «Свои трекеры» editor |
 
 Behind a reverse proxy with TLS, set `PUBLIC_URL` and `TRUSTED_PROXIES`, and in Jackett's settings set **Base URL override** to the same public URL so the links Jackett returns to clients are right.
 

@@ -167,4 +167,6 @@ export const qk = {
   invites: ["invites"] as const,
   /** GET /_ui/api/invites/{token} (public). */
   publicInvite: (token: string) => ["public-invite", token] as const,
+  /** GET /_ui/api/torrent/files?link=… (file list of a result's .torrent). */
+  torrentFiles: (link: string) => ["torrent-files", link] as const,
 };

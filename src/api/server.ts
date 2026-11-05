@@ -261,6 +261,20 @@ export interface ProviderTestResult {
   message?: string;
 }
 
+/** `GET /_ui/api/torrent/files`: `{magnet: true}` for magnet-only releases, else the parsed .torrent. */
+export interface TorrentFiles {
+  magnet?: boolean;
+  name?: string;
+  /** Hex SHA-1 of the info dictionary. */
+  infoHash?: string;
+  totalSize?: number;
+  /** Number of files (also when `files` is truncated). */
+  count?: number;
+  files?: { path: string; size: number }[];
+  /** More than 5000 files: only the first 5000 are listed. */
+  truncated?: boolean;
+}
+
 const BASE = "/_ui/api";
 
 interface CallOptions {
@@ -384,6 +398,14 @@ export const serverApi = {
   testProvider: (id: ProviderId, fields: ProviderFields) => protectedCall<{ url: string }>(`/settings/providers/${id}/test`, body("POST", fields)),
 
   testProviderResult: (id: ProviderId, token: string) => protectedCall<ProviderTestResult>(`/settings/providers/${id}/test/${enc(token)}`),
+
+  /* ── Torrent preview (any role) ── */
+
+  /**
+   * Downloads a result's .torrent through this panel's `/dl/…` and lists its files.
+   * `link`: a `/dl/…` path (or absolute URL on this origin). 400 `bad_link`, 502 `fetch_failed`, 422 `not_a_torrent`.
+   */
+  torrentFiles: (link: string) => protectedCall<TorrentFiles>(`/torrent/files?link=${enc(link)}`),
 };
 
 const safeReturn = (path: string) => (path.startsWith("/") && !path.startsWith("//") ? path : "/");
@@ -484,3 +506,6 @@ export async function waitForProviderTest(
     await sleep(intervalMs);
   }
 }
+
+/** Protected `/_ui/api` call for feature modules (src/api/definitions.ts). */
+export { protectedCall as uiCall };

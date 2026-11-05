@@ -5,6 +5,10 @@ import type { SearchResponse, SearchResult } from "@/api";
 
 import {
   categoryLabel,
+  commitDraft,
+  draftFromSelection,
+  onlyShown,
+  splitChips,
   defaultDesc,
   filterRows,
   firstLine,
@@ -142,5 +146,31 @@ describe("rows", () => {
     expect(defaultDesc("seeders")).toBe(true);
     expect(defaultDesc("published")).toBe(true);
     expect(defaultDesc("title")).toBe(false);
+  });
+});
+
+describe("tracker filter draft", () => {
+  const all = ["a", "b", "c"];
+
+  it("opens with everything ticked for 'all' and drops unknown ids", () => {
+    expect(draftFromSelection([], all)).toEqual(all);
+    expect(draftFromSelection(["gone"], all)).toEqual(all);
+    expect(draftFromSelection(["c", "gone", "a"], all)).toEqual(["c", "a"]);
+  });
+
+  it("commits nothing or everything as 'all', otherwise ids in list order", () => {
+    expect(commitDraft([], all)).toEqual([]);
+    expect(commitDraft(["c", "b", "a"], all)).toEqual([]);
+    expect(commitDraft(["c", "a", "gone"], all)).toEqual(["a", "c"]);
+  });
+
+  it("onlyShown keeps the filtered ids", () => {
+    expect(onlyShown([{ id: "b" }, { id: "c" }])).toEqual(["b", "c"]);
+  });
+
+  it("splitChips collapses at least two chips into +N", () => {
+    expect(splitChips(["a", "b", "c"], 3)).toEqual({ shown: ["a", "b", "c"], hidden: [] });
+    expect(splitChips(["a", "b", "c", "d"], 3)).toEqual({ shown: ["a", "b"], hidden: ["c", "d"] });
+    expect(splitChips(["a", "b"], 0)).toEqual({ shown: [], hidden: ["a", "b"] });
   });
 });

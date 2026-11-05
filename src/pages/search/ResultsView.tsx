@@ -1,6 +1,6 @@
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
 import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpDown, ArrowUpNarrowWide, Filter, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyState } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,8 @@ import {
   type ResultRow,
   type SortKey,
 } from "./logic";
+import { PosterThumb } from "./preview/Poster";
+import { ResultPreview } from "./preview/ResultPreview";
 import { ResultActions } from "./ResultActions";
 import { useMediaQuery } from "./useMediaQuery";
 
@@ -48,7 +50,24 @@ function Published({ row, now }: { row: ResultRow; now: number }) {
   );
 }
 
-function useColumns(now: number): ColumnDef<ResultRow>[] {
+/** Title as a button that opens the preview. */
+function TitleButton({ row, onPreview, className }: { row: ResultRow; onPreview: (row: ResultRow) => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      className={cn(
+        "break-words rounded-sm text-left leading-snug [overflow-wrap:anywhere] hover:text-primary hover:underline hover:underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        className,
+      )}
+      onClick={() => onPreview(row)}
+    >
+      {row.r.Title}
+    </button>
+  );
+}
+
+function useColumns(now: number, onPreview: (row: ResultRow) => void): ColumnDef<ResultRow>[] {
   return useMemo<ColumnDef<ResultRow>[]>(
     () => [
       {
@@ -57,11 +76,14 @@ function useColumns(now: number): ColumnDef<ResultRow>[] {
         sortDescFirst: false,
         meta: { className: "min-w-[14rem]" } satisfies Meta,
         cell: ({ row: { original: row } }) => (
-          <div className="min-w-0">
-            <div className="break-words leading-snug [overflow-wrap:anywhere]">{row.r.Title}</div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground xl:hidden">
-              <TrackerTag name={row.r.Tracker} />
-              {row.category && <span>{row.category}</span>}
+          <div className="flex min-w-0 items-start gap-2.5">
+            <PosterThumb src={row.r.Poster} className="-my-0.5" />
+            <div className="min-w-0">
+              <TitleButton row={row} onPreview={onPreview} />
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground xl:hidden">
+                <TrackerTag name={row.r.Tracker} />
+                {row.category && <span>{row.category}</span>}
+              </div>
             </div>
           </div>
         ),
@@ -113,10 +135,10 @@ function useColumns(now: number): ColumnDef<ResultRow>[] {
         header: () => <span className="sr-only">Действия</span>,
         enableSorting: false,
         meta: { className: "w-0 whitespace-nowrap pr-2" } satisfies Meta,
-        cell: ({ row: { original: row } }) => <ResultActions r={row.r} />,
+        cell: ({ row: { original: row } }) => <ResultActions r={row.r} onPreview={() => onPreview(row)} />,
       },
     ],
-    [now],
+    [now, onPreview],
   );
 }
 
@@ -149,14 +171,19 @@ function MobileSort({ sort, onChange }: { sort: { id: SortKey; desc: boolean }; 
   );
 }
 
-function ResultCard({ row, now }: { row: ResultRow; now: number }) {
+function ResultCard({ row, now, onPreview }: { row: ResultRow; now: number; onPreview: (row: ResultRow) => void }) {
   const r = row.r;
   return (
     <li className="rounded-lg border bg-card p-3">
-      <div className="break-words text-sm font-medium leading-snug [overflow-wrap:anywhere]">{r.Title}</div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <TrackerTag name={r.Tracker} />
-        {row.category && <span className="truncate">{row.category}</span>}
+      <div className="flex min-w-0 items-start gap-3">
+        <PosterThumb src={r.Poster} />
+        <div className="min-w-0 flex-1">
+          <TitleButton row={row} onPreview={onPreview} className="text-sm font-medium" />
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <TrackerTag name={r.Tracker} />
+            {row.category && <span className="truncate">{row.category}</span>}
+          </div>
+        </div>
       </div>
       <div className="mt-2 flex items-center gap-3 text-xs">
         <span className="tabular-nums">{formatSize(r.Size)}</span>
@@ -168,7 +195,7 @@ function ResultCard({ row, now }: { row: ResultRow; now: number }) {
         <span className="min-w-0 truncate text-muted-foreground">
           <Published row={row} now={now} />
         </span>
-        <ResultActions r={r} className="-my-1 ml-auto" />
+        <ResultActions r={r} onPreview={() => onPreview(row)} className="-my-1 ml-auto" />
       </div>
     </li>
   );
@@ -220,7 +247,11 @@ export function ResultsView({
   const more = () => setPaging({ key: listKey, limit: limit + PAGE });
   const page = visible.slice(0, limit);
 
-  const columns = useColumns(now);
+  // Preview panel: the row stays set while the close animation runs.
+  const [preview, setPreview] = useState<{ row: ResultRow | null; open: boolean }>({ row: null, open: false });
+  const openPreview = useCallback((row: ResultRow) => setPreview({ row, open: true }), []);
+
+  const columns = useColumns(now, openPreview);
   const table = useReactTable({
     data: page,
     columns,
@@ -339,7 +370,7 @@ export function ResultsView({
       ) : (
         <ul className="space-y-2">
           {page.map((row) => (
-            <ResultCard key={row.id} row={row} now={now} />
+            <ResultCard key={row.id} row={row} now={now} onPreview={openPreview} />
           ))}
         </ul>
       )}
@@ -357,6 +388,8 @@ export function ResultsView({
           </div>
         </div>
       )}
+
+      <ResultPreview row={preview.row} open={preview.open} onOpenChange={(open) => setPreview((p) => ({ ...p, open }))} />
     </div>
   );
 }

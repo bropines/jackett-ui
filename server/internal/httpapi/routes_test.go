@@ -83,7 +83,7 @@ func TestSetupGating(t *testing.T) {
 
 	// The password is stored hashed only.
 	raw, _ := os.ReadFile(filepath.Join(h.env["DATA_DIR"], store.FileName))
-	if strings.Contains(string(raw), adminPW) || !strings.Contains(string(raw), "$2a$12$") {
+	if strings.Contains(string(raw), adminPW) || !strings.Contains(string(raw), "$2a$") {
 		t.Fatal("password not stored as bcrypt hash")
 	}
 }

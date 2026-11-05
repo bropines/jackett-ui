@@ -122,7 +122,7 @@ export function JackettTab() {
   return (
     <div className="min-w-0">
       <p className="mb-4 text-sm text-muted-foreground">
-        Настройки самого Jackett, версия <Mono>{base.app_version}</Mono>.
+        Настройки самого Jackett (версия <Mono>{base.app_version}</Mono>). Сохраняются одной кнопкой внизу.
       </p>
 
       {restarting && (

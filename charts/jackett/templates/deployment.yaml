@@ -41,7 +41,7 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              mkdir -p /config/Jackett /config/jackett-ui
+              mkdir -p /config/Jackett /config/jackett-ui /config/cardigann/definitions
               f=/config/Jackett/ServerConfig.json
               [ -s "$f" ] || echo '{}' > "$f"
               {{- if $expr }}
@@ -115,6 +115,8 @@ spec:
             - { name: LISTEN, value: ":8080" }
             - { name: JACKETT_URL, value: "http://127.0.0.1:9117" }
             - { name: DATA_DIR, value: "/data" }
+            # Jackett reads custom definitions from $XDG_CONFIG_HOME/cardigann/definitions.
+            - { name: CARDIGANN_DIR, value: "/cardigann" }
             {{- with .Values.ingress.host }}
             {{- if $.Values.ingress.enabled }}
             - { name: PUBLIC_URL, value: {{ printf "http%s://%s" (ternary "s" "" (not (empty $.Values.ingress.tls))) . | quote }} }
@@ -133,6 +135,9 @@ spec:
             - name: config
               mountPath: /data
               subPath: jackett-ui
+            - name: config
+              mountPath: /cardigann
+              subPath: cardigann/definitions
           ports:
             - { name: http, containerPort: 8080 }
           readinessProbe:

@@ -102,3 +102,30 @@ Usage: `docker exec <container> jackett-ui reset-password admin` / `kubectl exec
 - **Users tab**: e-mail shown under the name; passkey count; e-mail in the create/edit dialogs; the bootstrap user is marked "из AUTH_PASSWORD".
 - **Settings → Способы входа**: a Passkey switch with the availability reason.
 - `src/lib/webauthn.ts`: base64url ↔ ArrayBuffer helpers and `createPasskey(publicKey)` / `getPasskey(publicKey)`. Use the native `parse*OptionsFromJSON` when present, otherwise convert by hand. No npm dependency.
+
+## 7. Own trackers (Cardigann definitions)
+Jackett loads YAML definitions from `$XDG_CONFIG_HOME/cardigann/definitions/`. In every supported image that is `/config/cardigann/definitions/`. `CARDIGANN_DIR` points the UI server to that folder: `/config/cardigann/definitions` in aio, `/cardigann` in the chart (the config volume's subPath `cardigann/definitions`; the init container creates it). Unset → the editor is off.
+
+The endpoints are admin only:
+- `GET /definitions` → `{available, dir, reason?, items:[{id, name, file, size, modifiedAt, problem?}]}`. Missing folder → created.
+- `GET /definitions/{id}` → `{definition, content}`.
+- `PUT /definitions/{id}` `{content}` → the item; written as `{id}.yml`, mode 0644, CRLF → LF.
+  - id: `^[a-z0-9][a-z0-9._-]{0,63}$`.
+  - The file must have top-level `id:` equal to `{id}`, plus `name:` and `links:`.
+  - At most 256 KB.
+- `DELETE /definitions/{id}` → 204.
+- `POST /definitions/reload` → `{ok, messages[]}`.
+  - Jackett has no reload endpoint. Any change of `flaresolverr_maxtimeout` in `server/config` restarts Jackett's web host, which reads the definitions again. The server nudges it by ±1 ms (even ↔ odd), waits until Jackett answers, and returns the Jackett log lines about Cardigann/definitions written since.
+
+## 8. Search preview
+`GET /torrent/files?link=` (session, any role) fetches a `/dl/…` link of this panel through the proxy (key injected, no cookie). It accepts only that path on our own origin (SSRF guard).
+- Limits: 20 s and 10 MB.
+- Answers: `{magnet:true}` for a magnet redirect; otherwise `{name, infoHash, totalSize, count, files[], truncated?}` (at most 5000 files).
+- Errors: 400 `bad_link`, 422 `not_a_torrent`, 502 `fetch_failed`.
+
+The UI shows the poster, description, links and file tree in a side panel. Files load on open for public trackers, and on a click for private ones (a download may count against the tracker's limits).
+
+## 9. Multi-select
+- Trackers page: row checkboxes, plus bulk test, delete and copy of Torznab URLs.
+- Catalog: add several at once. Public trackers with nothing to fill in are saved with defaults; the others open their setup dialogs one by one.
+- Search filter: chips, select all/none/only these, saved groups (localStorage).

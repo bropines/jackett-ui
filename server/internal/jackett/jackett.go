@@ -10,6 +10,7 @@
 package jackett
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -362,4 +363,42 @@ func (c *Client) InvalidateAPIKey() {
 	c.mu.Lock()
 	c.keyAt = time.Time{}
 	c.mu.Unlock()
+}
+
+// Do sends an authenticated API request to Jackett (path like
+// "/api/v2.0/server/config") with the server's cookie, logging in again
+// once on a login challenge. body is re-sent on the retry, so it is a
+// byte slice. The caller closes the response body.
+func (c *Client) Do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		cookie, gen := c.Cookie()
+		var rb io.Reader
+		if body != nil {
+			rb = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.endpoint(path), rb)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		req.Header.Set("Accept", "application/json")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		}
+		if !IsLoginChallenge(resp) || attempt > 0 {
+			return resp, nil
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+		if err := c.Relogin(ctx, gen); err != nil {
+			return nil, err
+		}
+	}
 }

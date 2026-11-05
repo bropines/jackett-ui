@@ -69,6 +69,36 @@ export function toggle<T>(list: readonly T[], item: T): T[] {
   return list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
 }
 
+/* ── Tracker filter draft ───────────────────────────────────────────────── */
+
+/**
+ * The tracker popover edits an explicit list of ticked ids. An empty URL selection
+ * means "all", so it opens with every tracker ticked; unknown ids are dropped.
+ */
+export function draftFromSelection(selected: readonly string[], all: readonly string[]): string[] {
+  const known = selected.filter((id) => all.includes(id));
+  return known.length === 0 ? [...all] : known;
+}
+
+/** Draft → selection to commit: nothing or everything ticked = "all" (empty); otherwise ids in list order. */
+export function commitDraft(draft: readonly string[], all: readonly string[]): string[] {
+  const picked = all.filter((id) => draft.includes(id));
+  return picked.length === 0 || picked.length === all.length ? [] : picked;
+}
+
+/** "Only these": keeps just the ids currently shown by the quick filter. */
+export function onlyShown(shown: readonly { id: string }[]): string[] {
+  return shown.map((x) => x.id);
+}
+
+/** Chips next to the filter button: first `max` shown, the rest collapsed into "+N". */
+export function splitChips<T>(items: readonly T[], max: number): { shown: T[]; hidden: T[] } {
+  if (items.length <= max) return { shown: [...items], hidden: [] };
+  // Showing "+1" instead of the last chip saves nothing: collapse at least two.
+  const keep = Math.max(0, max - 1);
+  return { shown: items.slice(0, keep), hidden: items.slice(keep) };
+}
+
 /* ── Formatting ─────────────────────────────────────────────────────────── */
 
 const SIZE_UNITS = ["Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ"];

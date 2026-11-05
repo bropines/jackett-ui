@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { torznabUrl, type IndexerSummary } from "@/api";
 import { copyText } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/misc";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,6 +33,8 @@ export function IndexerRow({
   onTest,
   onEdit,
   onDelete,
+  selected,
+  onSelect,
 }: {
   ix: IndexerSummary;
   test: TestState | undefined;
@@ -40,6 +43,9 @@ export function IndexerRow({
   onTest: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  /** Multi-select checkbox state. */
+  selected: boolean;
+  onSelect: (checked: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const status = effectiveStatus(ix, test);
@@ -49,8 +55,9 @@ export function IndexerRow({
   const canExpand = error !== "" && (error.trim() !== short || short.length > 100);
 
   return (
-    <li className="flex gap-3 px-4 py-3">
-      <div className="pt-1">
+    <li className={cn("flex gap-3 px-4 py-3", selected && "bg-primary/5")}>
+      <div className="flex items-start gap-3 pt-1">
+        <Checkbox className="h-5 w-5 sm:h-4 sm:w-4" checked={selected} onCheckedChange={(v) => onSelect(v === true)} aria-label={`Выбрать ${ix.name}`} />
         {running ? (
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Проверка" />
         ) : status.kind === "ok" ? (

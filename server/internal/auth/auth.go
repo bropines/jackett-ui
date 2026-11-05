@@ -55,6 +55,9 @@ type Authenticator interface {
 // BcryptCost is the cost for new password hashes.
 const BcryptCost = 12
 
+// HashCost is the cost HashPassword uses (tests lower it).
+var HashCost = BcryptCost
+
 // MinPasswordLen is the minimum password length (in characters).
 const MinPasswordLen = 8
 
@@ -83,7 +86,7 @@ func HashPassword(pw string) (string, error) {
 	if err := ValidatePassword(pw); err != nil {
 		return "", err
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(pw), BcryptCost)
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), HashCost)
 	if err != nil {
 		return "", err
 	}
