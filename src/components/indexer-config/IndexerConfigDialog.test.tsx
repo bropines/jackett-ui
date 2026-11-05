@@ -45,7 +45,7 @@ describe("IndexerConfigDialog", () => {
     await user.type(username, "bob");
     await user.type(password, "pw");
     await user.click(screen.getByLabelText("Use Magnet Links"));
-    await user.click(screen.getByRole("button", { name: "Сохранить" }));
+    await user.click(screen.getByRole("button", { name: "Добавить" }));
 
     await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
     const [id, sent] = saveSpy.mock.calls[0]!;

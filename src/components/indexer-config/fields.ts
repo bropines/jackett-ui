@@ -207,7 +207,7 @@ export function describeSaveError(message: string): SaveErrorInfo {
   let hint: string | null = null;
   if (/flaresolverr/i.test(message)) {
     hint =
-      "Трекер закрыт защитой Cloudflare. Чтобы пройти её, укажите адрес FlareSolverr в настройках Jackett (Настройки → FlareSolverr) и сохраните трекер ещё раз.";
+      "Сайт показал проверку Cloudflare, а пройти её Jackett может только через FlareSolverr. Попробуйте другое зеркало в поле адреса сайта, если оно есть, или укажите адрес FlareSolverr в Настройки → Jackett и сохраните трекер ещё раз.";
   }
   const captcha = /captcha|капч/i.test(message);
   if (captcha && !hint) hint = "Введите текст с новой картинки и сохраните ещё раз.";

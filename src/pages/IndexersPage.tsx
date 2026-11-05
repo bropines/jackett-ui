@@ -65,8 +65,6 @@ export function IndexersPage() {
   const [bulk, setBulk] = useState<{ done: number; total: number } | null>(null);
   const stopBulk = useRef(false);
   const [toDelete, setToDelete] = useState<IndexerSummary | null>(null);
-  /** Set when the config dialog was opened from the catalog: closing it without saving goes back there. */
-  const backToCatalog = useRef(false);
 
   /* Multi-select: ids of configured trackers; ones that disappear (deleted) drop out. */
   const [selectedRaw, setSelected] = useState<string[]>([]);
@@ -192,7 +190,6 @@ export function IndexersPage() {
   /* ── Bulk add from the catalog ── */
 
   const addMany = (list: IndexerSummary[]) => {
-    backToCatalog.current = false;
     setSearch({ add: undefined }, true);
     setSummaryOpen(true);
     void bulkAdd.start(list);
@@ -203,7 +200,6 @@ export function IndexersPage() {
     if (!first) return;
     setSummaryOpen(false);
     setSetupMode(true);
-    backToCatalog.current = false;
     setSearch({ edit: first.id });
   };
   const closeSummary = () => {
@@ -216,12 +212,12 @@ export function IndexersPage() {
   const editing = editId ? all.find((x) => x.id === editId) : undefined;
 
   const openCatalog = () => setSearch({ add: "1", edit: undefined });
-  const pick = (ix: IndexerSummary) => {
-    backToCatalog.current = true;
-    setSearch({ add: undefined, edit: ix.id }, true);
+  // Added in the catalog's right-hand pane: the catalog stays open for the next one.
+  const onCatalogAdded = (id: string) => {
+    setTests(({ [id]: _old, ...rest }) => rest);
+    void qc.invalidateQueries({ queryKey: qk.indexers });
   };
   const quickPick = (ix: IndexerSummary) => {
-    backToCatalog.current = false;
     setSearch({ add: undefined, edit: ix.id });
   };
   const closeEdit = () => {
@@ -236,13 +232,10 @@ export function IndexersPage() {
       setSearch({ edit: undefined }, true);
       return;
     }
-    const back = backToCatalog.current;
-    backToCatalog.current = false;
-    setSearch({ edit: undefined, add: back ? "1" : undefined }, true);
+    setSearch({ edit: undefined }, true);
   };
   // The dialog itself toasts the save and starts a background test.
   const onSaved = (id: string) => {
-    backToCatalog.current = false;
     setTests(({ [id]: _old, ...rest }) => rest);
     void qc.invalidateQueries({ queryKey: qk.indexers });
     if (setupMode) {
@@ -387,10 +380,7 @@ export function IndexersPage() {
                     test={tests[ix.id]}
                     canManage={canManage}
                     onTest={() => testOne(ix)}
-                    onEdit={() => {
-                      backToCatalog.current = false;
-                      setSearch({ edit: ix.id });
-                    }}
+                    onEdit={() => setSearch({ edit: ix.id })}
                     onDelete={() => setToDelete(ix)}
                     selected={selected.includes(ix.id)}
                     onSelect={() => setSelected((prev) => toggleId(prev, ix.id))}
@@ -426,7 +416,7 @@ export function IndexersPage() {
         open={addOpen && !!catalogQ.data}
         onOpenChange={(open) => (open ? openCatalog() : setSearch({ add: undefined }, true))}
         indexers={unconfigured}
-        onPick={pick}
+        onAdded={onCatalogAdded}
         onAddMany={addMany}
       />
 
