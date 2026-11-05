@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 import type { SearchIndexerStatus } from "@/api";
@@ -9,20 +9,23 @@ import { firstLine, formatElapsed } from "./logic";
 
 /**
  * Per-tracker outcome of the last search. OK chips toggle a client-side
- * "only this tracker" filter; error chips expand the error text.
+ * "only this tracker" filter; error chips expand the error text. Trackers still
+ * searching are shown last with a spinner.
  */
 export function IndexerStrip({
   indexers,
+  pending = [],
   only,
   onOnly,
 }: {
   indexers: SearchIndexerStatus[];
+  pending?: { ID: string; Name: string }[];
   only: string | null;
   onOnly: (id: string | null) => void;
 }) {
   const [openError, setOpenError] = useState<string | null>(null);
   const [full, setFull] = useState(false);
-  if (indexers.length === 0) return null;
+  if (indexers.length === 0 && pending.length === 0) return null;
 
   const sorted = [...indexers].sort((a, b) => (a.Status === 1 ? 0 : 1) - (b.Status === 1 ? 0 : 1) || b.Results - a.Results);
   const failed = indexers.find((i) => i.ID === openError && i.Status === 1);
@@ -67,6 +70,17 @@ export function IndexerStrip({
             </button>
           );
         })}
+        {pending.map((p) => (
+          <span
+            key={p.ID}
+            className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-dashed px-2 py-0.5 text-xs text-muted-foreground"
+            title="Ещё ищет"
+          >
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
+            <span className="truncate">{p.Name}</span>
+            <span className="sr-only">ищет</span>
+          </span>
+        ))}
       </div>
       {failed && (
         <div role="alert" className="rounded-md border border-red-500/40 bg-red-500/5 p-2 text-xs text-red-800 dark:text-red-200">

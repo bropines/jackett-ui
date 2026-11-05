@@ -16,11 +16,13 @@ import { plural } from "@/lib/format";
 import { BulkAddDialog } from "@/pages/indexers/BulkAddDialog";
 import { BulkBar } from "@/pages/indexers/BulkBar";
 import { CatalogDialog } from "@/pages/indexers/CatalogDialog";
+import { IndexerPane, type PaneState } from "@/pages/indexers/IndexerPane";
 import { IndexerRow } from "@/pages/indexers/IndexerRow";
 import { effectiveStatus, filterConfigured, firstLine, runQueue, type TestState } from "@/pages/indexers/logic";
 import { QbitHelp } from "@/pages/indexers/QbitHelp";
 import { namesPreview, pickSelected, pruneSelection, toggleId, toggleVisible, visibleCheckState } from "@/pages/indexers/selection";
 import { useBulkAdd } from "@/pages/indexers/useBulkAdd";
+import { useMediaQuery } from "@/pages/search/useMediaQuery";
 
 export interface IndexersPageSearch {
   add?: string;
@@ -44,6 +46,8 @@ export function IndexersPage() {
   const canManage = useCan("editor");
   const addOpen = canManage && search.add !== undefined;
   const editId = canManage ? (search.edit ?? null) : null;
+  /** Wide screens: settings of a configured tracker open in a right-hand column. */
+  const split = useMediaQuery("(min-width: 1024px)") && canManage;
 
   // Configured list is tiny; the full catalog (~400 KB gzipped) loads only when it is needed:
   // catalog open, the empty-state quick picks, or editing an indexer that is not configured yet.
@@ -253,6 +257,27 @@ export function IndexersPage() {
     setSearch({ edit: undefined, add: undefined }, true);
   };
 
+  /* ── Settings pane (wide screens) ── */
+
+  const pane = useRef<PaneState>({ dirty: false, busy: false });
+  const [leaveTo, setLeaveTo] = useState<{ id: string | undefined } | null>(null);
+  const paneIx = split && !setupMode && editId ? configured.find((x) => x.id === editId) : undefined;
+  const openPane = (id: string | undefined) => {
+    if (id === editId) return;
+    if (pane.current.busy) return;
+    if (pane.current.dirty) {
+      setLeaveTo({ id });
+      return;
+    }
+    pane.current = { dirty: false, busy: false };
+    setSearch({ edit: id }, true);
+  };
+  const editTracker = (id: string) => (split ? openPane(id) : setSearch({ edit: id }));
+  const onPaneSaved = (id: string) => {
+    setTests(({ [id]: _old, ...rest }) => rest);
+    void qc.invalidateQueries({ queryKey: qk.indexers });
+  };
+
   /* ── Render ── */
 
   const testing = bulk !== null;
@@ -380,7 +405,9 @@ export function IndexersPage() {
                     test={tests[ix.id]}
                     canManage={canManage}
                     onTest={() => testOne(ix)}
-                    onEdit={() => setSearch({ edit: ix.id })}
+                    onEdit={() => editTracker(ix.id)}
+                    compact={split}
+                    active={paneIx?.id === ix.id}
                     onDelete={() => setToDelete(ix)}
                     selected={selected.includes(ix.id)}
                     onSelect={() => setSelected((prev) => toggleId(prev, ix.id))}
@@ -406,11 +433,19 @@ export function IndexersPage() {
     );
   }
 
+  const showPane = split && configured.length > 0 && !indexersQ.isPending && !indexersQ.isError;
   return (
     <div className="min-w-0">
       {header}
       <QbitHelp />
-      {body}
+      {showPane ? (
+        <div className="grid grid-cols-[minmax(0,5fr)_minmax(0,6fr)] items-start gap-4">
+          <div className="min-w-0">{body}</div>
+          <IndexerPane ix={paneIx} state={pane} onClose={() => openPane(undefined)} onSaved={onPaneSaved} />
+        </div>
+      ) : (
+        body
+      )}
 
       <CatalogDialog
         open={addOpen && !!catalogQ.data}
@@ -432,13 +467,28 @@ export function IndexersPage() {
       )}
 
       <IndexerConfigDialog
-        indexerId={editId}
+        indexerId={paneIx ? null : editId}
         indexerName={editing?.name}
         isNew={editing ? !editing.configured : undefined}
         onOpenChange={(open) => {
           if (!open) closeEdit();
         }}
         onSaved={onSaved}
+      />
+
+      <ConfirmDialog
+        open={leaveTo !== null}
+        onOpenChange={(open) => !open && setLeaveTo(null)}
+        title="Уйти без сохранения?"
+        description={`Изменения в настройках ${paneIx?.name ?? "трекера"} пропадут.`}
+        confirmLabel="Уйти"
+        destructive
+        onConfirm={() => {
+          const next = leaveTo;
+          setLeaveTo(null);
+          pane.current = { dirty: false, busy: false };
+          setSearch({ edit: next?.id }, true);
+        }}
       />
 
       <ConfirmDialog

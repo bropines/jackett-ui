@@ -234,3 +234,25 @@ describe("welcome page (login methods)", () => {
     expect(serverApi.getSettings).not.toHaveBeenCalled();
   });
 });
+
+describe("search (one request per tracker)", () => {
+  it("shows answers as they come and marks a failing tracker without losing the rest", async () => {
+    vi.spyOn(serverApi, "authState").mockResolvedValue(authAs("viewer"));
+    const [a, b] = configured;
+    const result = {
+      Tracker: a!.name, TrackerId: a!.id, Title: "Mahou Shoujo 1080p", Guid: "g1", Link: "https://x/dl/1", Details: "https://x/1",
+      PublishDate: "2026-11-01T00:00:00", Category: [2000], CategoryDesc: "Movies", Size: 1000, Seeders: 5, Peers: 7,
+    };
+    const search = vi.spyOn(api, "search").mockImplementation(async (_p, id) => {
+      if (id === a!.id) return { Results: [result] as never, Indexers: [{ ID: a!.id, Name: a!.name, Status: 2, Results: 1, Error: null, ElapsedTime: 1200 }] };
+      throw new ApiError(524, "error code: 524");
+    });
+    renderApp("/?q=mahou");
+    expect(await screen.findByText("Mahou Shoujo 1080p")).toBeInTheDocument();
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search.mock.calls.map((c) => c[1]).sort()).toEqual([a!.id, b!.id].sort());
+    const failed = await screen.findByRole("button", { name: new RegExp(`${b!.name}.*ошибка`) });
+    await userEvent.click(failed);
+    expect(await screen.findByText(/100 с/)).toBeInTheDocument();
+  });
+});

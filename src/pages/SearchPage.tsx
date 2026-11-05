@@ -1,20 +1,23 @@
-import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Loader2, Plus, Search, SearchX, X } from "lucide-react";
+import { Loader2, Plus, Search, SearchX, Timer, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api, qk } from "@/api";
-import { Callout, EmptyState, ErrorState } from "@/components/common";
+import { Callout, EmptyState } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/misc";
-import { useSlashFocus } from "@/lib/hooks";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useLocalState, useSlashFocus } from "@/lib/hooks";
 import { plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { IndexerStrip } from "@/pages/search/IndexerStrip";
 import { joinIds, MAIN_CATEGORIES, parseCategories, parseIdList, toggle, toRows, trackersParam } from "@/pages/search/logic";
 import { ResultsView } from "@/pages/search/ResultsView";
 import { TrackerFilter } from "@/pages/search/TrackerFilter";
+import { TIMEOUT_CHOICES, timeoutSeconds } from "@/pages/search/fanout";
+import { useFanoutSearch } from "@/pages/search/useFanoutSearch";
 
 export interface SearchPageSearch {
   q?: string;
@@ -41,14 +44,11 @@ function useElapsedSeconds(active: boolean): number {
 export function SearchPage() {
   const search = useSearch({ from: "/" });
   const navigate = useNavigate({ from: "/" });
-  const queryClient = useQueryClient();
   const inputRef = useSlashFocus<HTMLInputElement>();
 
   const q = search.q?.trim() ?? "";
   const trackers = useMemo(() => parseIdList(search.t), [search.t]);
   const categories = useMemo(() => parseCategories(search.c), [search.c]);
-  const t = joinIds(trackers) ?? "";
-  const c = joinIds(categories) ?? "";
 
   // Input text follows the URL (back/forward, shared links) but is edited locally until submit.
   const [text, setText] = useState(q);
@@ -65,22 +65,25 @@ export function SearchPage() {
   );
   const noIndexers = indexersQ.isSuccess && configured.length === 0;
 
-  const searchKey = ["search", q, t, c] as const;
-  const res = useQuery({
-    queryKey: searchKey,
-    queryFn: ({ signal }) => api.search({ query: q, trackers, categories }, "all", signal),
-    enabled: q !== "",
-    staleTime: SEARCH_STALE,
-    retry: false,
-    placeholderData: keepPreviousData,
-  });
-  const fetching = res.isFetching;
+  // One request per tracker. Without the tracker list (it failed to load) fall back to "all".
+  const asked = useMemo(() => {
+    if (indexersQ.isError) return [{ id: "all", name: "Все трекеры" }];
+    if (!indexersQ.isSuccess) return [];
+    const names = new Map(configured.map((i) => [i.id, i.name]));
+    const ids = trackers.length > 0 ? trackers : configured.map((i) => i.id);
+    return ids.map((id) => ({ id, name: names.get(id) ?? id }));
+  }, [indexersQ.isError, indexersQ.isSuccess, configured, trackers]);
+  const [timeoutRaw, setTimeoutRaw] = useLocalState<number>("jui.search.timeout", 0);
+  const timeout = timeoutSeconds(timeoutRaw);
+  const res = useFanoutSearch({ query: q, trackers: asked, categories, enabled: q !== "", timeoutMs: timeout * 1000 });
+  const fetching = res.fetching;
   const elapsed = useElapsedSeconds(fetching);
-  // A cancelled first fetch reverts to "pending" (or to the previous search's placeholder data).
-  const cancelled = q !== "" && !fetching && (res.isPending || res.isPlaceholderData);
+  const waitingForList = q !== "" && indexersQ.isPending;
+  // Cancelled before any tracker answered.
+  const cancelled = q !== "" && !fetching && !res.any && res.cancelledCount > 0;
 
-  const rows = useMemo(() => toRows(res.data?.Results ?? []), [res.data]);
-  const statuses = useMemo(() => res.data?.Indexers ?? [], [res.data]);
+  const rows = useMemo(() => toRows(res.Results), [res.Results]);
+  const statuses = res.Indexers;
   const failedCount = statuses.filter((i) => i.Status === 1).length;
 
   // "Only this tracker" (client side); ignored once the response no longer has that tracker.
@@ -108,7 +111,6 @@ export function SearchPage() {
     setSearch({ q: next || undefined });
   };
 
-  const searchingOn = trackers.length > 0 ? trackers.length : configured.length;
 
   return (
     <div className="space-y-3">
@@ -191,6 +193,24 @@ export function SearchPage() {
             </button>
           )}
         </div>
+        <span className="mx-0.5 h-5 w-px shrink-0 bg-border" aria-hidden />
+        <Select value={String(timeout)} onValueChange={(v) => setTimeoutRaw(Number(v))}>
+          <SelectTrigger
+            className="h-8 w-auto shrink-0 gap-1.5 rounded-full px-3 text-xs"
+            aria-label="Сколько ждать каждый трекер"
+            title="Сколько ждать каждый трекер. Кто не успел, покажется с ошибкой, остальные результаты останутся."
+          >
+            <Timer className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {TIMEOUT_CHOICES.map((sec) => (
+              <SelectItem key={sec} value={String(sec)}>
+                Ждать {sec} с
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {indexersQ.isError && <Callout variant="error">Не удалось загрузить список трекеров: фильтр по трекерам недоступен.</Callout>}
@@ -239,16 +259,11 @@ export function SearchPage() {
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                 <span>
-                  Ищу
-                  {searchingOn > 0 && ` на ${searchingOn} ${plural(searchingOn, ["трекере", "трекерах", "трекерах"])}`}…{" "}
+                  Ищу… ответили <span className="tabular-nums">{res.answered}</span> из{" "}
+                  <span className="tabular-nums">{res.total}</span> {plural(res.total, ["трекера", "трекеров", "трекеров"])} ·{" "}
                   <span className="tabular-nums">{elapsed} с</span>
                 </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="ml-auto h-7"
-                  onClick={() => void queryClient.cancelQueries({ queryKey: searchKey })}
-                >
+                <Button variant="ghost" size="sm" className="ml-auto h-7" onClick={res.cancel}>
                   Отменить
                 </Button>
               </div>
@@ -271,14 +286,10 @@ export function SearchPage() {
                 }
               />
             </div>
-          ) : res.isError && !fetching ? (
-            <div className="rounded-lg border bg-card">
-              <ErrorState error={res.error} onRetry={() => void res.refetch()} />
-            </div>
-          ) : res.data ? (
+          ) : res.any ? (
             <>
-              <IndexerStrip indexers={statuses} only={only} onOnly={setOnly} />
-              {rows.length === 0 ? (
+              <IndexerStrip indexers={statuses} pending={res.pending} only={only} onOnly={setOnly} />
+              {rows.length === 0 && fetching ? null : rows.length === 0 ? (
                 <div className="rounded-lg border bg-card">
                   <EmptyState
                     icon={SearchX}
@@ -291,10 +302,10 @@ export function SearchPage() {
                   />
                 </div>
               ) : (
-                <ResultsView rows={rows} dimmed={res.isPlaceholderData} only={only} onOnly={setOnly} />
+                <ResultsView rows={rows} only={only} onOnly={setOnly} />
               )}
             </>
-          ) : fetching ? (
+          ) : fetching || waitingForList ? (
             <div className="space-y-2" aria-hidden>
               {Array.from({ length: 6 }).map((_, i) => (
                 <Skeleton key={i} className="h-12 w-full" />

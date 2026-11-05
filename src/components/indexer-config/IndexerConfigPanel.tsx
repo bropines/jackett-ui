@@ -97,6 +97,8 @@ export function IndexerConfigPanel({ id, title, isNew, enabled = true, onSaved, 
       }
     },
     onSuccess: () => {
+      // The saved values are the new baseline (the panel may stay open after a save).
+      setInitial(state);
       void queryClient.invalidateQueries({ queryKey: qk.indexers });
       toast.success(isNew ? `${title} добавлен` : `${title}: настройки сохранены`);
       onSaved?.(id);

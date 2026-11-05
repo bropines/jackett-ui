@@ -35,6 +35,8 @@ export function IndexerRow({
   onDelete,
   selected,
   onSelect,
+  compact = false,
+  active = false,
 }: {
   ix: IndexerSummary;
   test: TestState | undefined;
@@ -46,7 +48,14 @@ export function IndexerRow({
   /** Multi-select checkbox state. */
   selected: boolean;
   onSelect: (checked: boolean) => void;
+  /** Narrow column next to the settings pane: "Проверить"/"Настроить" move into the menu. */
+  compact?: boolean;
+  /** Its settings are open in the pane. */
+  active?: boolean;
 }) {
+  // In compact mode the menu always has the actions; otherwise only on phones.
+  const inMenu = compact ? "" : "sm:hidden";
+  const asButtons = compact ? "hidden" : "hidden sm:inline-flex";
   const [expanded, setExpanded] = useState(false);
   const status = effectiveStatus(ix, test);
   const running = status.kind === "running";
@@ -55,7 +64,10 @@ export function IndexerRow({
   const canExpand = error !== "" && (error.trim() !== short || short.length > 100);
 
   return (
-    <li className={cn("flex gap-3 px-4 py-3", selected && "bg-primary/5")}>
+    <li
+      className={cn("flex gap-3 border-l-2 border-l-transparent px-4 py-3", selected && "bg-primary/5", active && "border-l-primary bg-accent")}
+      aria-current={active ? "true" : undefined}
+    >
       <div className="flex items-start gap-3 pt-1">
         <Checkbox className="h-5 w-5 sm:h-4 sm:w-4" checked={selected} onCheckedChange={(v) => onSelect(v === true)} aria-label={`Выбрать ${ix.name}`} />
         {running ? (
@@ -105,7 +117,7 @@ export function IndexerRow({
             </a>
           )}
           {ix.description && (
-            <span className="hidden min-w-0 truncate md:inline" title={ix.description}>
+            <span className={cn("hidden min-w-0 truncate", !compact && "md:inline")} title={ix.description}>
               · {ix.description}
             </span>
           )}
@@ -141,11 +153,11 @@ export function IndexerRow({
       <div className="flex shrink-0 items-start gap-1">
         {canManage && (
           <>
-            <Button variant="outline" size="sm" className="hidden sm:inline-flex" disabled={running} onClick={onTest}>
+            <Button variant="outline" size="sm" className={asButtons} disabled={running} onClick={onTest}>
               {running ? <Loader2 className="animate-spin" /> : <Play />}
               Проверить
             </Button>
-            <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onEdit}>
+            <Button variant="outline" size="sm" className={asButtons} onClick={onEdit}>
               <Pencil />
               Настроить
             </Button>
@@ -160,11 +172,11 @@ export function IndexerRow({
           <DropdownMenuContent align="end" className="w-56">
             {canManage && (
               <>
-                <DropdownMenuItem className="sm:hidden" disabled={running} onSelect={onTest}>
+                <DropdownMenuItem className={inMenu} disabled={running} onSelect={onTest}>
                   <Play />
                   Проверить
                 </DropdownMenuItem>
-                <DropdownMenuItem className="sm:hidden" onSelect={onEdit}>
+                <DropdownMenuItem className={inMenu} onSelect={onEdit}>
                   <Pencil />
                   Настроить
                 </DropdownMenuItem>
