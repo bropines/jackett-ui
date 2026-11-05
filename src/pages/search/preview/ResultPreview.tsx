@@ -26,9 +26,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function ActionLink({ href, newTab, children }: { href: string; newTab?: boolean; children: React.ReactNode }) {
+function ActionLink({ href, newTab, download, children }: { href: string; newTab?: boolean; download?: boolean; children: React.ReactNode }) {
   return (
-    <a href={href} className={buttonVariants({ variant: "outline", size: "sm" })} {...(newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
+    <a
+      href={href}
+      className={buttonVariants({ variant: "outline", size: "sm" })}
+      {...(newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+      {...(download ? { download: "" } : {})}
+    >
       {children}
     </a>
   );
@@ -123,7 +128,7 @@ function PreviewBody({ row }: { row: ResultRow }) {
 
         <div className="flex flex-wrap gap-2">
           {torrent && (
-            <ActionLink href={torrent}>
+            <ActionLink href={torrent} download>
               <Download />
               Скачать .torrent
             </ActionLink>

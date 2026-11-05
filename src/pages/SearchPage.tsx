@@ -27,6 +27,15 @@ export interface SearchPageSearch {
 
 const SEARCH_STALE = 5 * 60_000;
 
+/**
+ * Seconds since the search started. Its own component, so the once-a-second tick re-renders
+ * only this text, not the page with its results and an open preview.
+ */
+function Elapsed() {
+  const s = useElapsedSeconds(true);
+  return <span className="tabular-nums">{s} с</span>;
+}
+
 /** Seconds since `active` became true (0 while inactive). */
 function useElapsedSeconds(active: boolean): number {
   const [start, setStart] = useState<number | null>(null);
@@ -77,7 +86,6 @@ export function SearchPage() {
   const timeout = timeoutSeconds(timeoutRaw);
   const res = useFanoutSearch({ query: q, trackers: asked, categories, enabled: q !== "", timeoutMs: timeout * 1000 });
   const fetching = res.fetching;
-  const elapsed = useElapsedSeconds(fetching);
   const waitingForList = q !== "" && indexersQ.isPending;
   // Cancelled before any tracker answered.
   const cancelled = q !== "" && !fetching && !res.any && res.cancelledCount > 0;
@@ -261,7 +269,7 @@ export function SearchPage() {
                 <span>
                   Ищу… ответили <span className="tabular-nums">{res.answered}</span> из{" "}
                   <span className="tabular-nums">{res.total}</span> {plural(res.total, ["трекера", "трекеров", "трекеров"])} ·{" "}
-                  <span className="tabular-nums">{elapsed} с</span>
+                  <Elapsed />
                 </span>
                 <Button variant="ghost" size="sm" className="ml-auto h-7" onClick={res.cancel}>
                   Отменить
@@ -270,7 +278,6 @@ export function SearchPage() {
               <div className="h-0.5 overflow-hidden rounded bg-muted">
                 <div className="h-full w-1/3 animate-[search-progress_1.2s_ease-in-out_infinite] rounded bg-primary" />
               </div>
-              <style>{`@keyframes search-progress{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}`}</style>
             </div>
           )}
 

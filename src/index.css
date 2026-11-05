@@ -65,3 +65,9 @@
     font-feature-settings: "cv11", "ss01";
   }
 }
+
+/* Search progress bar (indeterminate). */
+@keyframes search-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

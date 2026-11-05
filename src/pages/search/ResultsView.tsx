@@ -1,6 +1,6 @@
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef, type SortingState } from "@tanstack/react-table";
 import { ArrowDown, ArrowDownWideNarrow, ArrowUp, ArrowUpDown, ArrowUpNarrowWide, Filter, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyState } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -220,7 +220,7 @@ function MoreSentinel({ onMore }: { onMore: () => void }) {
  * Results list: client-side filter + sort, table on ≥ md, cards below.
  * Renders PAGE rows at a time and grows on scroll so 1000+ results stay fast.
  */
-export function ResultsView({
+export const ResultsView = memo(function ResultsView({
   rows,
   dimmed,
   only,
@@ -392,4 +392,4 @@ export function ResultsView({
       <ResultPreview row={preview.row} open={preview.open} onOpenChange={(open) => setPreview((p) => ({ ...p, open }))} />
     </div>
   );
-}
+});

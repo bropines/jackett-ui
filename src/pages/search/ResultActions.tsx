@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 const btn =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_svg]:size-4";
 
-function IconLink({ href, label, newTab, children }: { href: string; label: string; newTab?: boolean; children: React.ReactNode }) {
+function IconLink({ href, label, newTab, download, children }: { href: string; label: string; newTab?: boolean; download?: boolean; children: React.ReactNode }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -17,6 +17,8 @@ function IconLink({ href, label, newTab, children }: { href: string; label: stri
           className={btn}
           aria-label={label}
           {...(newTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+          // Download in the background instead of navigating the page (it may still be searching).
+          {...(download ? { download: "" } : {})}
           onClick={(e) => e.stopPropagation()}
         >
           {children}
@@ -57,7 +59,7 @@ export function ResultActions({ r, className, onPreview }: { r: SearchResult; cl
         </IconLink>
       )}
       {torrent && (
-        <IconLink href={torrent} label="Скачать .torrent">
+        <IconLink href={torrent} label="Скачать .torrent" download>
           <Download />
         </IconLink>
       )}
